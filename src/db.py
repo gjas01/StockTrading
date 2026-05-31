@@ -1,0 +1,153 @@
+import json
+import os
+from contextlib import contextmanager
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Iterator, Optional
+
+from dotenv import load_dotenv
+from pyodbc import connect as connect_db
+
+load_dotenv()
+
+
+def db_connection():
+    trusted = os.environ.get("AI_DB_TRUSTED", "0") in ("1", "true", "True", "yes")
+    server = os.environ.get("AI_DB_SERVER", "cg-test.database.windows.net,1433")
+    database = os.environ.get("AI_DB_DATABASE", "OpenAI")
+
+    if trusted:
+        cnxn_str = (
+            "DRIVER={ODBC Driver 17 for SQL Server};"
+            "MARS_Connection=no;"
+            f"SERVER={server};"
+            f"DATABASE={database};"
+            "Trusted_Connection=yes;"
+            "APP=Stock Trading;"
+        )
+    else:
+        login = os.environ.get("AI_DB_LOGIN", "UserService")
+        password = os.environ.get("AI_DB_PASSWORD", "")
+        cnxn_str = (
+            "DRIVER={ODBC Driver 17 for SQL Server};"
+            "MARS_Connection=no;"
+            f"SERVER={server};"
+            f"DATABASE={database};"
+            f"UID={login};"
+            f"PWD={password};"
+            "APP=Stock Trading;"
+            "Encrypt=yes"
+        )
+
+    cnxn = connect_db(cnxn_str, timeout=30)
+    cnxn.autocommit = True
+    return cnxn
+
+
+@contextmanager
+def get_cursor() -> Iterator[Any]:
+    conn = db_connection()
+    cursor = conn.cursor()
+    try:
+        yield cursor
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _row_to_dict(cursor, row) -> dict:
+    columns = [column[0] for column in cursor.description]
+    result = {}
+    for column, value in zip(columns, row):
+        if isinstance(value, Decimal):
+            result[column] = float(value)
+        elif isinstance(value, datetime):
+            result[column] = value.date() if column.endswith("Date") else value
+        else:
+            result[column] = value
+    return result
+
+
+def fetch_all(proc: str, params: tuple = ()) -> list[dict]:
+    with get_cursor() as cursor:
+        if params:
+            cursor.execute(f"EXEC {proc}", params)
+        else:
+            cursor.execute(f"EXEC {proc}")
+        if not cursor.description:
+            return []
+        return [_row_to_dict(cursor, row) for row in cursor.fetchall()]
+
+
+def fetch_one(proc: str, params: tuple = ()) -> Optional[dict]:
+    rows = fetch_all(proc, params)
+    return rows[0] if rows else None
+
+
+def execute_proc(proc: str, params: tuple = ()) -> Optional[dict]:
+    return fetch_one(proc, params)
+
+
+def country_insert(name: str) -> Optional[int]:
+    row = execute_proc("stocks.Country_Insert", (name,))
+    return int(row["CountryID"]) if row and row.get("CountryID") is not None else None
+
+
+def country_list() -> list[dict]:
+    return fetch_all("stocks.Country_List")
+
+
+def exchange_insert(country_id: int, name: str, yahoo_suffix: str = "") -> Optional[int]:
+    row = execute_proc(
+        "stocks.Exchange_Insert",
+        (country_id, name, yahoo_suffix or None),
+    )
+    return int(row["ExchangeID"]) if row and row.get("ExchangeID") is not None else None
+
+
+def exchange_list(country_id: Optional[int] = None) -> list[dict]:
+    if country_id is None:
+        return fetch_all("stocks.Exchange_List")
+    return fetch_all("stocks.Exchange_List", (country_id,))
+
+
+def stock_insert(exchange_id: int, ticker: str, full_name: str) -> Optional[int]:
+    row = execute_proc("stocks.Stock_Insert", (exchange_id, ticker, full_name))
+    return int(row["StockID"]) if row and row.get("StockID") is not None else None
+
+
+def stock_list(exchange_id: Optional[int] = None) -> list[dict]:
+    if exchange_id is None:
+        return fetch_all("stocks.Stock_List")
+    return fetch_all("stocks.Stock_List", (exchange_id,))
+
+
+def stock_list_for_price_pull() -> list[dict]:
+    return fetch_all("stocks.Stock_ListForPricePull")
+
+
+def stock_price_get_latest_date(stock_id: int) -> Optional[date]:
+    row = execute_proc("stocks.StockPrice_GetLatestDate", (stock_id,))
+    if not row:
+        return None
+    latest = row.get("LatestDate")
+    if latest is None:
+        return None
+    if isinstance(latest, date):
+        return latest
+    return latest.date()
+
+
+def stock_price_get_overlap(stock_id: int, from_date: date, to_date: date) -> list[dict]:
+    return fetch_all("stocks.StockPrice_GetOverlap", (stock_id, from_date, to_date))
+
+
+def stock_price_apply_adjustment(stock_id: int, factor: float) -> int:
+    row = execute_proc("stocks.StockPrice_ApplyAdjustment", (stock_id, factor))
+    return int(row["RowsAdjusted"]) if row and row.get("RowsAdjusted") is not None else 0
+
+
+def stock_price_merge(stock_id: int, prices: list[dict]) -> int:
+    payload = json.dumps(prices, default=str)
+    row = execute_proc("stocks.StockPrice_Merge", (stock_id, payload))
+    return int(row["RowsMerged"]) if row and row.get("RowsMerged") is not None else 0
