@@ -27,7 +27,12 @@ class StockTab(ttk.Frame):
         self.refresh_exchanges()
 
     def refresh_exchanges(self):
-        self.exchanges = db.exchange_list()
+        try:
+            self.exchanges = db.exchange_list()
+        except Exception as exc:
+            self.exchanges = []
+            messagebox.showerror("Database Error", str(exc))
+            return
         labels = [
             f"{exchange['CountryName']} / {exchange['Name']}"
             for exchange in self.exchanges

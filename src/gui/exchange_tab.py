@@ -31,7 +31,12 @@ class ExchangeTab(ttk.Frame):
         self.refresh_countries()
 
     def refresh_countries(self):
-        self.countries = db.country_list()
+        try:
+            self.countries = db.country_list()
+        except Exception as exc:
+            self.countries = []
+            messagebox.showerror("Database Error", str(exc))
+            return
         labels = [country["Name"] for country in self.countries]
         self.country_combo["values"] = labels
         if labels and not self.country_var.get():

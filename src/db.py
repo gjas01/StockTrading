@@ -6,22 +6,76 @@ from decimal import Decimal
 from typing import Any, Iterator, Optional
 
 from dotenv import load_dotenv
+import pyodbc
 from pyodbc import connect as connect_db
 
 load_dotenv()
+
+_DRIVER_PREFERENCE = (
+    "ODBC Driver 18 for SQL Server",
+    "ODBC Driver 17 for SQL Server",
+    "SQL Server Native Client 11.0",
+    "SQL Server",
+)
+
+
+def _resolve_driver() -> str:
+    override = os.environ.get("AI_DB_DRIVER", "").strip()
+    installed = pyodbc.drivers()
+    installed_lookup = {driver.casefold(): driver for driver in installed}
+
+    if override:
+        driver = installed_lookup.get(override.casefold())
+        if driver:
+            return driver
+        if override in installed:
+            return override
+        raise RuntimeError(
+            f"Configured AI_DB_DRIVER '{override}' is not installed. "
+            f"Available drivers: {', '.join(installed) or 'none'}"
+        )
+
+    for preferred in _DRIVER_PREFERENCE:
+        if preferred in installed:
+            return preferred
+
+    for driver in installed:
+        if "sql server" in driver.casefold():
+            return driver
+
+    raise RuntimeError(
+        "No SQL Server ODBC driver found. Install 'ODBC Driver 18 for SQL Server' "
+        "or set AI_DB_DRIVER to an installed driver. "
+        f"Available drivers: {', '.join(installed) or 'none'}"
+    )
+
+
+def _driver_options(driver: str, trusted: bool) -> str:
+    if "ODBC Driver 18" in driver:
+        if trusted:
+            return "Encrypt=optional;TrustServerCertificate=yes;"
+        return "Encrypt=yes;TrustServerCertificate=no;"
+    if "ODBC Driver 17" in driver:
+        if trusted:
+            return "Encrypt=optional;"
+        return "Encrypt=yes;"
+    return ""
 
 
 def db_connection():
     trusted = os.environ.get("AI_DB_TRUSTED", "0") in ("1", "true", "True", "yes")
     server = os.environ.get("AI_DB_SERVER", "cg-test.database.windows.net,1433")
     database = os.environ.get("AI_DB_DATABASE", "OpenAI")
+    driver = _resolve_driver()
+    options = _driver_options(driver, trusted)
 
     if trusted:
         cnxn_str = (
-            "DRIVER={ODBC Driver 17 for SQL Server};"
+            f"DRIVER={{{driver}}};"
             "MARS_Connection=no;"
             f"SERVER={server};"
             f"DATABASE={database};"
+            f"{options}"
             "Trusted_Connection=yes;"
             "APP=Stock Trading;"
         )
@@ -29,14 +83,14 @@ def db_connection():
         login = os.environ.get("AI_DB_LOGIN", "UserService")
         password = os.environ.get("AI_DB_PASSWORD", "")
         cnxn_str = (
-            "DRIVER={ODBC Driver 17 for SQL Server};"
+            f"DRIVER={{{driver}}};"
             "MARS_Connection=no;"
             f"SERVER={server};"
             f"DATABASE={database};"
             f"UID={login};"
             f"PWD={password};"
+            f"{options}"
             "APP=Stock Trading;"
-            "Encrypt=yes"
         )
 
     cnxn = connect_db(cnxn_str, timeout=30)
