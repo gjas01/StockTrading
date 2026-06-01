@@ -5,8 +5,9 @@ from src import db
 
 
 class StockTab(ttk.Frame):
-    def __init__(self, master):
+    def __init__(self, master, refresh_callbacks=None):
         super().__init__(master, padding=12)
+        self.refresh_callbacks = refresh_callbacks or []
 
         ttk.Label(self, text="Exchange:").grid(row=0, column=0, sticky="w")
         self.exchange_var = tk.StringVar()
@@ -21,10 +22,40 @@ class StockTab(ttk.Frame):
         self.full_name_var = tk.StringVar()
         ttk.Entry(self, textvariable=self.full_name_var, width=40).grid(row=2, column=1, padx=8, pady=(8, 0), sticky="ew")
 
-        ttk.Button(self, text="Add Stock", command=self.add_stock).grid(row=3, column=1, sticky="e", pady=12)
+        ttk.Button(self, text="Add Stock", command=self.add_stock).grid(row=3, column=1, sticky="e", pady=(12, 0))
+
+        ttk.Label(self, text="Stocks").grid(row=4, column=0, columnspan=2, sticky="w", pady=(16, 4))
+
+        list_frame = ttk.Frame(self)
+        list_frame.grid(row=5, column=0, columnspan=2, sticky="nsew")
         self.columnconfigure(1, weight=1)
+        self.rowconfigure(5, weight=1)
+
+        self.tree = ttk.Treeview(
+            list_frame,
+            columns=("id", "country", "exchange", "ticker", "name"),
+            show="headings",
+            height=12,
+        )
+        self.tree.heading("id", text="ID")
+        self.tree.heading("country", text="Country")
+        self.tree.heading("exchange", text="Exchange")
+        self.tree.heading("ticker", text="Ticker")
+        self.tree.heading("name", text="Full Name")
+        self.tree.column("id", width=60, stretch=False)
+        self.tree.column("country", width=100, stretch=True)
+        self.tree.column("exchange", width=120, stretch=True)
+        self.tree.column("ticker", width=80, stretch=False)
+        self.tree.column("name", width=220, stretch=True)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
         self.exchanges = []
         self.refresh_exchanges()
+        self.refresh_list()
 
     def refresh_exchanges(self):
         try:
@@ -40,6 +71,28 @@ class StockTab(ttk.Frame):
         self.exchange_combo["values"] = labels
         if labels and not self.exchange_var.get():
             self.exchange_combo.current(0)
+
+    def refresh_list(self):
+        try:
+            stocks = db.stock_list()
+        except Exception as exc:
+            messagebox.showerror("Database Error", str(exc))
+            stocks = []
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for stock in stocks:
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    stock["StockID"],
+                    stock["CountryName"],
+                    stock["ExchangeName"],
+                    stock["Ticker"],
+                    stock["FullName"],
+                ),
+            )
 
     def _selected_exchange_id(self):
         label = self.exchange_var.get()
@@ -64,5 +117,8 @@ class StockTab(ttk.Frame):
             messagebox.showinfo("Success", f"Stock added (ID {stock_id}).")
             self.ticker_var.set("")
             self.full_name_var.set("")
+            self.refresh_list()
+            for callback in self.refresh_callbacks:
+                callback()
         except Exception as exc:
             messagebox.showerror("Error", str(exc))

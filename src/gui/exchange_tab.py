@@ -25,10 +25,38 @@ class ExchangeTab(ttk.Frame):
             row=3, column=1, sticky="w", padx=8
         )
 
-        ttk.Button(self, text="Add Exchange", command=self.add_exchange).grid(row=4, column=1, sticky="e", pady=12)
+        ttk.Button(self, text="Add Exchange", command=self.add_exchange).grid(row=4, column=1, sticky="e", pady=(12, 0))
+
+        ttk.Label(self, text="Exchanges").grid(row=5, column=0, columnspan=2, sticky="w", pady=(16, 4))
+
+        list_frame = ttk.Frame(self)
+        list_frame.grid(row=6, column=0, columnspan=2, sticky="nsew")
         self.columnconfigure(1, weight=1)
+        self.rowconfigure(6, weight=1)
+
+        self.tree = ttk.Treeview(
+            list_frame,
+            columns=("id", "country", "name", "suffix"),
+            show="headings",
+            height=12,
+        )
+        self.tree.heading("id", text="ID")
+        self.tree.heading("country", text="Country")
+        self.tree.heading("name", text="Exchange")
+        self.tree.heading("suffix", text="Yahoo Suffix")
+        self.tree.column("id", width=60, stretch=False)
+        self.tree.column("country", width=120, stretch=True)
+        self.tree.column("name", width=160, stretch=True)
+        self.tree.column("suffix", width=100, stretch=False)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
         self.countries = []
         self.refresh_countries()
+        self.refresh_list()
 
     def refresh_countries(self):
         try:
@@ -41,6 +69,27 @@ class ExchangeTab(ttk.Frame):
         self.country_combo["values"] = labels
         if labels and not self.country_var.get():
             self.country_combo.current(0)
+
+    def refresh_list(self):
+        try:
+            exchanges = db.exchange_list()
+        except Exception as exc:
+            messagebox.showerror("Database Error", str(exc))
+            exchanges = []
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for exchange in exchanges:
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    exchange["ExchangeID"],
+                    exchange["CountryName"],
+                    exchange["Name"],
+                    exchange.get("YahooSuffix") or "",
+                ),
+            )
 
     def _selected_country_id(self):
         name = self.country_var.get()
@@ -63,6 +112,7 @@ class ExchangeTab(ttk.Frame):
             messagebox.showinfo("Success", f"Exchange added (ID {exchange_id}).")
             self.name_var.set("")
             self.suffix_var.set("")
+            self.refresh_list()
             for callback in self.refresh_callbacks:
                 callback()
         except Exception as exc:

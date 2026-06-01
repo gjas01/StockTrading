@@ -125,7 +125,8 @@ def _row_to_dict(cursor, row) -> dict:
 def fetch_all(proc: str, params: tuple = ()) -> list[dict]:
     with get_cursor() as cursor:
         if params:
-            cursor.execute(f"EXEC {proc}", params)
+            placeholders = ", ".join("?" for _ in params)
+            cursor.execute(f"EXEC {proc} {placeholders}", params)
         else:
             cursor.execute(f"EXEC {proc}")
         if not cursor.description:
@@ -205,3 +206,12 @@ def stock_price_merge(stock_id: int, prices: list[dict]) -> int:
     payload = json.dumps(prices, default=str)
     row = execute_proc("stocks.StockPrice_Merge", (stock_id, payload))
     return int(row["RowsMerged"]) if row and row.get("RowsMerged") is not None else 0
+
+
+def pair_insert(primary_stock_id: int, secondary_stock_id: int) -> Optional[int]:
+    row = execute_proc("stocks.Pair_Insert", (primary_stock_id, secondary_stock_id))
+    return int(row["PairID"]) if row and row.get("PairID") is not None else None
+
+
+def pair_list() -> list[dict]:
+    return fetch_all("stocks.Pair_List")
