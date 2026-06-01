@@ -17,10 +17,11 @@ class AdjustmentResult:
     message: str = ""
 
 
+from src.db import _parse_date
+
+
 def _normalize_date(value) -> date:
-    if isinstance(value, date):
-        return value
-    return value.date()
+    return _parse_date(value)
 
 
 def compute_adjustment(

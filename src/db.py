@@ -109,6 +109,18 @@ def get_cursor() -> Iterator[Any]:
         conn.close()
 
 
+def _parse_date(value) -> date:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        return date.fromisoformat(value[:10])
+    if hasattr(value, "date"):
+        return value.date()
+    raise TypeError(f"Unsupported date value: {value!r}")
+
+
 def _row_to_dict(cursor, row) -> dict:
     columns = [column[0] for column in cursor.description]
     result = {}
@@ -117,6 +129,8 @@ def _row_to_dict(cursor, row) -> dict:
             result[column] = float(value)
         elif isinstance(value, datetime):
             result[column] = value.date() if column.endswith("Date") else value
+        elif isinstance(value, str) and column.endswith("Date"):
+            result[column] = _parse_date(value)
         else:
             result[column] = value
     return result
@@ -188,9 +202,7 @@ def stock_price_get_latest_date(stock_id: int) -> Optional[date]:
     latest = row.get("LatestDate")
     if latest is None:
         return None
-    if isinstance(latest, date):
-        return latest
-    return latest.date()
+    return _parse_date(latest)
 
 
 def stock_price_get_overlap(stock_id: int, from_date: date, to_date: date) -> list[dict]:

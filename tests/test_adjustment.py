@@ -32,6 +32,18 @@ class AdjustmentTests(unittest.TestCase):
         self.assertTrue(result.needed)
         self.assertAlmostEqual(result.factor, 0.5, places=4)
 
+    def test_no_adjustment_when_fetched_dates_are_iso_strings(self):
+        stored = [
+            {"TradeDate": date(2024, 1, 2), "Close": 100.0},
+            {"TradeDate": date(2024, 1, 3), "Close": 101.0},
+        ]
+        fetched = [
+            {"TradeDate": "2024-01-02", "Close": 100.00005},
+            {"TradeDate": "2024-01-03", "Close": 101.00004},
+        ]
+        result = compute_adjustment(stored, fetched)
+        self.assertFalse(result.needed)
+
     def test_fetch_window_initial_and_overlap(self):
         today = date(2026, 5, 31)
         start, end = fetch_window(None, today)

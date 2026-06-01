@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Optional
+from typing import Literal, Optional
 
 
 CONTINUATION_PCT = 0.03
 REVERSAL_PCT = 0.06
+NEAR_PIVOT_PCT = 0.015
 
 COLUMNS = (
     "Secondary Rally",
@@ -41,22 +42,41 @@ class LedgerRow:
     secondary_reaction: Optional[float] = None
     note: str = ""
     pivotal: set[str] = field(default_factory=set)
+    blue: set[str] = field(default_factory=set)
+    red: set[str] = field(default_factory=set)
 
 
 @dataclass
 class _LedgerState:
-    column: str = "Upward Trend"
-    upward_peak: Optional[float] = None
-    last_upward: Optional[float] = None
-    reaction_low: Optional[float] = None
-    last_reaction: Optional[float] = None
-    secondary_rally_high: Optional[float] = None
+    phase: Literal[
+        "waiting",
+        "up_trend",
+        "natural_reaction",
+        "secondary_rally",
+        "secondary_reaction",
+        "down_trend",
+        "natural_rally",
+    ] = "waiting"
+    trend: Literal["up", "down"] = "up"
+    first_close: Optional[float] = None
+
+    cycle_extreme: Optional[float] = None
+    last_primary: Optional[float] = None
+    primary_extreme_date: Optional[date] = None
+
+    natural_extreme: Optional[float] = None
+    last_natural: Optional[float] = None
+    natural_extreme_date: Optional[date] = None
+
+    secondary_rally_extreme: Optional[float] = None
     last_secondary_rally: Optional[float] = None
-    downward_trough: Optional[float] = None
-    last_downward: Optional[float] = None
-    rally_high: Optional[float] = None
-    last_natural_rally: Optional[float] = None
+    sr_peak_before_reaction: Optional[float] = None
+
+    secondary_reaction_extreme: Optional[float] = None
     last_secondary_reaction: Optional[float] = None
+
+    pivot_upper: Optional[float] = None
+    pivot_lower: Optional[float] = None
 
 
 def _as_date(value) -> date:
@@ -71,188 +91,363 @@ def _append_note(row: LedgerRow, message: str) -> None:
     row.note = f"{row.note} {message}".strip()
 
 
-def _record(row: LedgerRow, column: str, price: float, pivotal: bool = False) -> None:
+def _write(row: LedgerRow, column: str, price: float) -> None:
+    setattr(row, COLUMN_KEYS[column], price)
+
+
+def _mark_pivot_on_row(rows: list[LedgerRow], trade_date: date, column: str) -> None:
     key = COLUMN_KEYS[column]
-    setattr(row, key, price)
-    if pivotal:
-        row.pivotal.add(key)
+    for row in rows:
+        if row.trade_date == trade_date and getattr(row, key) is not None:
+            row.pivotal.add(key)
+            return
 
 
-def _process_upward_trend(state: _LedgerState, row: LedgerRow, high: float, low: float) -> None:
-    extended = False
-    if state.last_upward is None or high > state.last_upward:
-        _record(row, "Upward Trend", high, pivotal=True)
-        state.last_upward = high
-        state.upward_peak = high if state.upward_peak is None else max(state.upward_peak, high)
-        extended = True
-
-    if state.upward_peak and low <= state.upward_peak * (1 - REVERSAL_PCT):
-        state.column = "Natural Reaction"
-        _record(row, "Natural Reaction", low, pivotal=True)
-        state.reaction_low = low
-        state.last_reaction = low
-        if extended:
-            _append_note(
-                row,
-                "Same day: upward extension then Natural Reaction (day low -6% from new pivot high)",
-            )
-        else:
-            _append_note(row, "Natural Reaction opened (day low -6% from pivot high)")
+def _reset_bull_correction(state: _LedgerState) -> None:
+    state.natural_extreme = None
+    state.last_natural = None
+    state.natural_extreme_date = None
+    state.secondary_rally_extreme = None
+    state.last_secondary_rally = None
+    state.sr_peak_before_reaction = None
+    state.secondary_reaction_extreme = None
+    state.last_secondary_reaction = None
+    state.pivot_upper = None
+    state.pivot_lower = None
 
 
-def _process_natural_reaction(state: _LedgerState, row: LedgerRow, high: float, low: float) -> None:
-    prior_reaction_low = state.reaction_low
+def _reset_bear_correction(state: _LedgerState) -> None:
+    _reset_bull_correction(state)
 
-    if prior_reaction_low is not None and low < prior_reaction_low:
-        _record(row, "Natural Reaction", low, pivotal=True)
-        state.reaction_low = low
-        state.last_reaction = low
-        _append_note(row, "Danger signal: reaction low breached")
-        state.column = "Downward Trend"
-        state.last_downward = low
-        state.downward_trough = low
-        _record(row, "Downward Trend", low, pivotal=True)
+
+def _start_up_trend(state: _LedgerState, row: LedgerRow, high: float) -> None:
+    state.phase = "up_trend"
+    state.trend = "up"
+    state.cycle_extreme = high
+    state.last_primary = high
+    state.primary_extreme_date = row.trade_date
+    _write(row, "Upward Trend", high)
+
+
+def _start_down_trend(state: _LedgerState, row: LedgerRow, low: float) -> None:
+    state.phase = "down_trend"
+    state.trend = "down"
+    state.cycle_extreme = low
+    state.last_primary = low
+    state.primary_extreme_date = row.trade_date
+    _write(row, "Downward Trend", low)
+
+
+def _open_natural_reaction(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], low: float
+) -> None:
+    if state.primary_extreme_date and state.cycle_extreme is not None:
+        _mark_pivot_on_row(rows, state.primary_extreme_date, "Upward Trend")
+        state.pivot_upper = state.cycle_extreme
+    state.phase = "natural_reaction"
+    state.natural_extreme = low
+    state.last_natural = low
+    state.natural_extreme_date = row.trade_date
+    _write(row, "Natural Reaction", low)
+    _append_note(row, "Natural Reaction opened (-6% from cycle high)")
+
+
+def _open_secondary_rally(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float
+) -> None:
+    if state.natural_extreme_date is not None:
+        _mark_pivot_on_row(rows, state.natural_extreme_date, "Natural Reaction")
+        state.pivot_lower = state.natural_extreme
+    state.phase = "secondary_rally"
+    state.last_secondary_rally = high
+    state.secondary_rally_extreme = high
+    _write(row, "Secondary Rally", high)
+    _maybe_blue_secondary_rally(row, state, high)
+    _append_note(row, "Secondary Rally opened (+3% from reaction low)")
+
+
+def _open_natural_rally(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float
+) -> None:
+    if state.primary_extreme_date and state.cycle_extreme is not None:
+        _mark_pivot_on_row(rows, state.primary_extreme_date, "Downward Trend")
+        state.pivot_lower = state.cycle_extreme
+    state.phase = "natural_rally"
+    state.natural_extreme = high
+    state.last_natural = high
+    state.natural_extreme_date = row.trade_date
+    _write(row, "Natural Rally", high)
+    _append_note(row, "Natural Rally opened (+6% from cycle low)")
+
+
+def _open_secondary_reaction_down(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], low: float
+) -> None:
+    if state.natural_extreme_date is not None:
+        _mark_pivot_on_row(rows, state.natural_extreme_date, "Natural Rally")
+        state.pivot_upper = state.natural_extreme
+    state.phase = "secondary_reaction"
+    state.last_secondary_reaction = low
+    state.secondary_reaction_extreme = low
+    _write(row, "Secondary Reaction", low)
+    _append_note(row, "Secondary Reaction opened (-3% from rally high)")
+
+
+def _maybe_blue_secondary_rally(row: LedgerRow, state: _LedgerState, high: float) -> None:
+    if state.pivot_upper and high >= state.pivot_upper * (1 - NEAR_PIVOT_PCT):
+        row.blue.add(COLUMN_KEYS["Secondary Rally"])
+
+
+def _maybe_red_secondary_reaction(row: LedgerRow, state: _LedgerState, low: float) -> None:
+    if state.pivot_lower and low <= state.pivot_lower * (1 + NEAR_PIVOT_PCT):
+        row.red.add(COLUMN_KEYS["Secondary Reaction"])
+
+
+def _resume_up_trend(state: _LedgerState, row: LedgerRow, high: float) -> None:
+    _reset_bull_correction(state)
+    state.phase = "up_trend"
+    state.trend = "up"
+    state.cycle_extreme = high
+    state.last_primary = high
+    state.primary_extreme_date = row.trade_date
+    _write(row, "Upward Trend", high)
+    _append_note(row, "Upward Trend resumed (+3% above pivot upper)")
+
+
+def _resume_down_trend(state: _LedgerState, row: LedgerRow, low: float) -> None:
+    _reset_bear_correction(state)
+    state.phase = "down_trend"
+    state.trend = "down"
+    state.cycle_extreme = low
+    state.last_primary = low
+    state.primary_extreme_date = row.trade_date
+    _write(row, "Downward Trend", low)
+    _append_note(row, "Downward Trend resumed (-3% below pivot upper)")
+
+
+def _flip_to_down_trend(state: _LedgerState, row: LedgerRow, low: float) -> None:
+    _reset_bull_correction(state)
+    _start_down_trend(state, row, low)
+    _append_note(row, "Downward Trend started (-3% below pivot lower)")
+
+
+def _flip_to_up_trend(state: _LedgerState, row: LedgerRow, high: float) -> None:
+    _reset_bear_correction(state)
+    _start_up_trend(state, row, high)
+    _append_note(row, "Upward Trend started (+3% above pivot lower)")
+
+
+def _process_waiting(state: _LedgerState, row: LedgerRow, high: float, low: float) -> None:
+    if state.first_close is None:
+        state.first_close = float(row.close)
         return
 
-    extended = False
-    if state.last_reaction is None or low < state.last_reaction:
-        _record(row, "Natural Reaction", low, pivotal=True)
-        state.reaction_low = low
-        state.last_reaction = low
-        extended = True
-
-    if state.reaction_low and high >= state.reaction_low * (1 + CONTINUATION_PCT):
-        state.column = "Secondary Rally"
-        state.secondary_rally_high = high
-        state.last_secondary_rally = high
-        _record(row, "Secondary Rally", high, pivotal=True)
-        if extended:
-            _append_note(
-                row,
-                "Same day: reaction low extension then Secondary Rally (day high +3% from pivot low)",
-            )
+    basis = state.first_close
+    if high >= basis * (1 + REVERSAL_PCT):
+        _start_up_trend(state, row, high)
+        _append_note(row, "Initial Up Trend (+6% above first close, day high)")
+    elif low <= basis * (1 - REVERSAL_PCT):
+        _start_down_trend(state, row, low)
+        _append_note(row, "Initial Down Trend (-6% below first close, day low)")
 
 
-def _process_secondary_rally(state: _LedgerState, row: LedgerRow, high: float, low: float) -> None:
-    if state.upward_peak and high > state.upward_peak:
-        state.column = "Upward Trend"
-        _record(row, "Upward Trend", high, pivotal=True)
-        state.last_upward = high
-        state.upward_peak = high
-        state.secondary_rally_high = None
-        state.last_secondary_rally = None
-        if low <= high * (1 - REVERSAL_PCT):
-            state.column = "Natural Reaction"
-            _record(row, "Natural Reaction", low, pivotal=True)
-            state.reaction_low = low
-            state.last_reaction = low
-            _append_note(
-                row,
-                "Same day: resumed Upward Trend then Natural Reaction from new pivot high",
-            )
+def _process_up_trend(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+) -> None:
+    if state.last_primary is None or high > state.last_primary:
+        _write(row, "Upward Trend", high)
+        state.last_primary = high
+        if state.cycle_extreme is None or high >= state.cycle_extreme:
+            state.cycle_extreme = high
+            state.primary_extreme_date = row.trade_date
+
+    if state.cycle_extreme and low <= state.cycle_extreme * (1 - REVERSAL_PCT):
+        _open_natural_reaction(state, row, rows, low)
+
+
+def _process_natural_reaction(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+) -> None:
+    if state.last_natural is None or low < state.last_natural:
+        _write(row, "Natural Reaction", low)
+        state.last_natural = low
+        state.natural_extreme = low
+        state.natural_extreme_date = row.trade_date
+
+    if state.natural_extreme and high >= state.natural_extreme * (1 + CONTINUATION_PCT):
+        _open_secondary_rally(state, row, rows, high)
+
+
+def _process_secondary_rally(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+) -> None:
+    if state.pivot_upper and high >= state.pivot_upper * (1 + CONTINUATION_PCT):
+        _resume_up_trend(state, row, high)
         return
 
-    extended = False
+    if state.pivot_lower and low <= state.pivot_lower * (1 - CONTINUATION_PCT):
+        _flip_to_down_trend(state, row, low)
+        return
+
+    if state.secondary_rally_extreme and low <= state.secondary_rally_extreme * (1 - CONTINUATION_PCT):
+        state.sr_peak_before_reaction = state.secondary_rally_extreme
+        state.phase = "secondary_reaction"
+        state.last_secondary_reaction = low
+        state.secondary_reaction_extreme = low
+        _write(row, "Secondary Reaction", low)
+        _maybe_red_secondary_reaction(row, state, low)
+        _append_note(row, "Secondary Reaction (-3% below secondary rally high)")
+        return
+
     if state.last_secondary_rally is None or high > state.last_secondary_rally:
-        _record(row, "Secondary Rally", high, pivotal=True)
+        _write(row, "Secondary Rally", high)
         state.last_secondary_rally = high
-        state.secondary_rally_high = high if state.secondary_rally_high is None else max(
-            state.secondary_rally_high, high
-        )
-        extended = True
-        if state.upward_peak and state.secondary_rally_high <= state.upward_peak * (1 - CONTINUATION_PCT):
-            _append_note(row, "Secondary rally failed to reach within 3% of primary high")
+        state.secondary_rally_extreme = high
+        _maybe_blue_secondary_rally(row, state, high)
 
-    if (
-        state.secondary_rally_high
-        and state.upward_peak
-        and state.secondary_rally_high <= state.upward_peak * (1 - CONTINUATION_PCT)
-        and low <= state.secondary_rally_high * (1 - CONTINUATION_PCT)
-    ):
-        state.column = "Secondary Reaction"
-        _record(row, "Secondary Reaction", low, pivotal=True)
-        state.last_secondary_reaction = low
-        if extended:
-            _append_note(
-                row,
-                "Same day: secondary rally extension then rollover (day low -3% from new pivot high)",
-            )
-        else:
-            _append_note(row, "Rollover: day low -3% from secondary rally pivot high (shave signal)")
+
+def _process_secondary_reaction(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+) -> None:
+    if state.pivot_lower and low <= state.pivot_lower * (1 - CONTINUATION_PCT):
+        _flip_to_down_trend(state, row, low)
         return
 
-    if not extended and state.last_secondary_rally and high < state.last_secondary_rally:
-        _record(row, "Secondary Rally", high)
-
-
-def _process_secondary_reaction(state: _LedgerState, row: LedgerRow, high: float, low: float) -> None:
-    extended = False
     if state.last_secondary_reaction is None or low < state.last_secondary_reaction:
-        _record(row, "Secondary Reaction", low, pivotal=True)
+        _write(row, "Secondary Reaction", low)
         state.last_secondary_reaction = low
-        extended = True
+        state.secondary_reaction_extreme = low
+        _maybe_red_secondary_reaction(row, state, low)
 
-    if state.reaction_low and low < state.reaction_low:
-        _append_note(row, "Exit: broke natural reaction low")
-        state.column = "Downward Trend"
-        state.last_downward = low
-        state.downward_trough = low
-        _record(row, "Downward Trend", low, pivotal=True)
+    threshold = (state.last_secondary_reaction or low) * (1 + CONTINUATION_PCT)
+    if high >= threshold and not (
+        state.pivot_lower and low <= state.pivot_lower * (1 - CONTINUATION_PCT)
+    ):
+        state.phase = "secondary_rally"
+        prior_peak = state.sr_peak_before_reaction or 0.0
+        if high > prior_peak:
+            _write(row, "Secondary Rally", high)
+            state.last_secondary_rally = high
+            state.secondary_rally_extreme = high
+            _maybe_blue_secondary_rally(row, state, high)
+            _append_note(row, "Secondary Rally resumed (+3% from secondary reaction low)")
+        else:
+            state.last_secondary_rally = high
+            state.secondary_rally_extreme = high
+            _write(row, "Secondary Rally", high)
+            _maybe_blue_secondary_rally(row, state, high)
+            _append_note(row, "Secondary Rally resumed (below prior peak)")
+
+
+def _process_down_trend(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+) -> None:
+    if state.last_primary is None or low < state.last_primary:
+        _write(row, "Downward Trend", low)
+        state.last_primary = low
+        if state.cycle_extreme is None or low <= state.cycle_extreme:
+            state.cycle_extreme = low
+            state.primary_extreme_date = row.trade_date
+
+    if state.cycle_extreme and high >= state.cycle_extreme * (1 + REVERSAL_PCT):
+        _open_natural_rally(state, row, rows, high)
+
+
+def _process_natural_rally(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+) -> None:
+    if state.last_natural is None or high > state.last_natural:
+        _write(row, "Natural Rally", high)
+        state.last_natural = high
+        state.natural_extreme = high
+        state.natural_extreme_date = row.trade_date
+
+    if state.natural_extreme and low <= state.natural_extreme * (1 - CONTINUATION_PCT):
+        _open_secondary_reaction_down(state, row, rows, low)
+
+
+def _process_secondary_reaction_down(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+) -> None:
+    if state.pivot_upper and high >= state.pivot_upper * (1 + CONTINUATION_PCT):
+        _flip_to_up_trend(state, row, high)
         return
 
-    if high >= (state.last_secondary_reaction or low) * (1 + CONTINUATION_PCT):
-        state.column = "Natural Rally"
-        state.rally_high = high
-        state.last_natural_rally = high
-        _record(row, "Natural Rally", high, pivotal=True)
-        if extended:
-            _append_note(
-                row,
-                "Same day: secondary reaction extension then Natural Rally (day high +3% from pivot low)",
-            )
+    if state.pivot_lower and low <= state.pivot_lower * (1 - CONTINUATION_PCT):
+        _resume_down_trend(state, row, low)
+        return
 
-
-def _process_downward_trend(state: _LedgerState, row: LedgerRow, high: float, low: float) -> None:
-    extended = False
-    if state.last_downward is None or low < state.last_downward:
-        _record(row, "Downward Trend", low, pivotal=True)
-        state.last_downward = low
-        state.downward_trough = low if state.downward_trough is None else min(state.downward_trough, low)
-        extended = True
-
-    if state.downward_trough and high >= state.downward_trough * (1 + REVERSAL_PCT):
-        state.column = "Natural Rally"
-        state.rally_high = high
-        state.last_natural_rally = high
-        _record(row, "Natural Rally", high, pivotal=True)
-        if extended:
-            _append_note(
-                row,
-                "Same day: downward extension then Natural Rally (day high +6% from new pivot low)",
-            )
-        else:
-            _append_note(row, "Natural Rally opened (day high +6% from pivot low)")
-
-
-def _process_natural_rally(state: _LedgerState, row: LedgerRow, high: float, low: float) -> None:
-    extended = False
-    if state.last_natural_rally is None or high > state.last_natural_rally:
-        _record(row, "Natural Rally", high, pivotal=True)
-        state.last_natural_rally = high
-        state.rally_high = high if state.rally_high is None else max(state.rally_high, high)
-        extended = True
-
-    if state.rally_high and low <= state.rally_high * (1 - CONTINUATION_PCT):
-        state.column = "Secondary Reaction"
+    if state.last_secondary_reaction is None or low < state.last_secondary_reaction:
+        _write(row, "Secondary Reaction", low)
         state.last_secondary_reaction = low
-        _record(row, "Secondary Reaction", low, pivotal=True)
-        if extended:
-            _append_note(
-                row,
-                "Same day: natural rally extension then Secondary Reaction (day low -3% from new pivot high)",
-            )
+        state.secondary_reaction_extreme = low
+        _maybe_red_secondary_reaction(row, state, low)
+
+    threshold = (state.last_secondary_reaction or low) * (1 + CONTINUATION_PCT)
+    if high >= threshold and not (
+        state.pivot_lower and low <= state.pivot_lower * (1 - CONTINUATION_PCT)
+    ):
+        state.phase = "secondary_rally"
+        state.last_secondary_rally = high
+        state.secondary_rally_extreme = high
+        _write(row, "Secondary Rally", high)
+        _maybe_blue_secondary_rally(row, state, high)
+        _append_note(row, "Secondary Rally resumed (+3% from secondary reaction low)")
+
+
+def _process_secondary_rally_down(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+) -> None:
+    if state.pivot_upper and high >= state.pivot_upper * (1 + CONTINUATION_PCT):
+        _flip_to_up_trend(state, row, high)
+        return
+
+    if state.pivot_lower and low <= state.pivot_lower * (1 - CONTINUATION_PCT):
+        _resume_down_trend(state, row, low)
+        return
+
+    if state.secondary_rally_extreme and low <= state.secondary_rally_extreme * (
+        1 - CONTINUATION_PCT
+    ):
+        state.sr_peak_before_reaction = state.secondary_rally_extreme
+        state.phase = "secondary_reaction"
+        state.last_secondary_reaction = low
+        state.secondary_reaction_extreme = low
+        _write(row, "Secondary Reaction", low)
+        _maybe_red_secondary_reaction(row, state, low)
+        _append_note(row, "Secondary Reaction (-3% below secondary rally high)")
+        return
+
+    if state.last_secondary_rally is None or high > state.last_secondary_rally:
+        _write(row, "Secondary Rally", high)
+        state.last_secondary_rally = high
+        state.secondary_rally_extreme = high
+        _maybe_blue_secondary_rally(row, state, high)
+
+
+def _process_day(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+) -> None:
+    if state.phase == "waiting":
+        _process_waiting(state, row, high, low)
+    elif state.phase == "up_trend":
+        _process_up_trend(state, row, rows, high, low)
+    elif state.phase == "natural_reaction":
+        _process_natural_reaction(state, row, rows, high, low)
+    elif state.phase == "secondary_rally":
+        if state.trend == "up":
+            _process_secondary_rally(state, row, rows, high, low)
         else:
-            _append_note(row, "Secondary reaction (day low -3% from rally pivot high)")
+            _process_secondary_rally_down(state, row, rows, high, low)
+    elif state.phase == "secondary_reaction":
+        if state.trend == "up":
+            _process_secondary_reaction(state, row, rows, high, low)
+        else:
+            _process_secondary_reaction_down(state, row, rows, high, low)
+    elif state.phase == "down_trend":
+        _process_down_trend(state, row, rows, high, low)
+    elif state.phase == "natural_rally":
+        _process_natural_rally(state, row, rows, high, low)
 
 
 def build_ledger(prices: list[dict]) -> list[LedgerRow]:
@@ -269,20 +464,7 @@ def build_ledger(prices: list[dict]) -> list[LedgerRow]:
         low = float(price_row["Low"])
         close = float(price_row["Close"])
         ledger_row = LedgerRow(trade_date=trade_date, high=high, low=low, close=close)
-
-        if state.column == "Upward Trend":
-            _process_upward_trend(state, ledger_row, high, low)
-        elif state.column == "Natural Reaction":
-            _process_natural_reaction(state, ledger_row, high, low)
-        elif state.column == "Secondary Rally":
-            _process_secondary_rally(state, ledger_row, high, low)
-        elif state.column == "Secondary Reaction":
-            _process_secondary_reaction(state, ledger_row, high, low)
-        elif state.column == "Downward Trend":
-            _process_downward_trend(state, ledger_row, high, low)
-        elif state.column == "Natural Rally":
-            _process_natural_rally(state, ledger_row, high, low)
-
+        _process_day(state, ledger_row, rows, high, low)
         rows.append(ledger_row)
 
     return rows
