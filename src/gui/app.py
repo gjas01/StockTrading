@@ -12,7 +12,7 @@ class StockTradingApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Stock Trading")
-        self.geometry("900x650")
+        self.geometry("1000x700")
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
@@ -41,8 +41,6 @@ class StockTradingApp(tk.Tk):
         self.exchange_tab.refresh_list()
         self.stock_tab.refresh_exchanges()
         self.stock_tab.refresh_list()
-        self.pair_tab.refresh_stocks()
-        self.pair_tab.refresh_list()
 
 
 def main():

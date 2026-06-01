@@ -197,6 +197,10 @@ def stock_price_get_overlap(stock_id: int, from_date: date, to_date: date) -> li
     return fetch_all("stocks.StockPrice_GetOverlap", (stock_id, from_date, to_date))
 
 
+def stock_price_list(stock_id: int) -> list[dict]:
+    return fetch_all("stocks.StockPrice_List", (stock_id,))
+
+
 def stock_price_apply_adjustment(stock_id: int, factor: float) -> int:
     row = execute_proc("stocks.StockPrice_ApplyAdjustment", (stock_id, factor))
     return int(row["RowsAdjusted"]) if row and row.get("RowsAdjusted") is not None else 0
