@@ -103,6 +103,24 @@ def _mark_pivot_on_row(rows: list[LedgerRow], trade_date: date, column: str) -> 
             return
 
 
+def _mark_primary_pivot(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], column: str
+) -> None:
+    if state.primary_extreme_date == row.trade_date:
+        row.pivotal.add(COLUMN_KEYS[column])
+    elif state.primary_extreme_date is not None:
+        _mark_pivot_on_row(rows, state.primary_extreme_date, column)
+
+
+def _mark_natural_pivot(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], column: str
+) -> None:
+    if state.natural_extreme_date == row.trade_date:
+        row.pivotal.add(COLUMN_KEYS[column])
+    elif state.natural_extreme_date is not None:
+        _mark_pivot_on_row(rows, state.natural_extreme_date, column)
+
+
 def _reset_bull_correction(state: _LedgerState) -> None:
     state.natural_extreme = None
     state.last_natural = None
@@ -139,24 +157,30 @@ def _start_down_trend(state: _LedgerState, row: LedgerRow, low: float) -> None:
 
 
 def _open_natural_reaction(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], low: float
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], low: float, *, same_day: bool = False
 ) -> None:
-    if state.primary_extreme_date and state.cycle_extreme is not None:
-        _mark_pivot_on_row(rows, state.primary_extreme_date, "Upward Trend")
+    if state.cycle_extreme is not None:
+        _mark_primary_pivot(state, row, rows, "Upward Trend")
         state.pivot_upper = state.cycle_extreme
     state.phase = "natural_reaction"
     state.natural_extreme = low
     state.last_natural = low
     state.natural_extreme_date = row.trade_date
     _write(row, "Natural Reaction", low)
-    _append_note(row, "Natural Reaction opened (-6% from cycle high)")
+    if same_day:
+        _append_note(
+            row,
+            "Same day: upward extension then Natural Reaction (day low -6% from new pivot high)",
+        )
+    else:
+        _append_note(row, "Natural Reaction opened (-6% from cycle high)")
 
 
 def _open_secondary_rally(
     state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float
 ) -> None:
     if state.natural_extreme_date is not None:
-        _mark_pivot_on_row(rows, state.natural_extreme_date, "Natural Reaction")
+        _mark_natural_pivot(state, row, rows, "Natural Reaction")
         state.pivot_lower = state.natural_extreme
     state.phase = "secondary_rally"
     state.last_secondary_rally = high
@@ -167,24 +191,30 @@ def _open_secondary_rally(
 
 
 def _open_natural_rally(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, *, same_day: bool = False
 ) -> None:
-    if state.primary_extreme_date and state.cycle_extreme is not None:
-        _mark_pivot_on_row(rows, state.primary_extreme_date, "Downward Trend")
+    if state.cycle_extreme is not None:
+        _mark_primary_pivot(state, row, rows, "Downward Trend")
         state.pivot_lower = state.cycle_extreme
     state.phase = "natural_rally"
     state.natural_extreme = high
     state.last_natural = high
     state.natural_extreme_date = row.trade_date
     _write(row, "Natural Rally", high)
-    _append_note(row, "Natural Rally opened (+6% from cycle low)")
+    if same_day:
+        _append_note(
+            row,
+            "Same day: downward extension then Natural Rally (day high +6% from new pivot low)",
+        )
+    else:
+        _append_note(row, "Natural Rally opened (+6% from cycle low)")
 
 
 def _open_secondary_reaction_down(
     state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], low: float
 ) -> None:
     if state.natural_extreme_date is not None:
-        _mark_pivot_on_row(rows, state.natural_extreme_date, "Natural Rally")
+        _mark_natural_pivot(state, row, rows, "Natural Rally")
         state.pivot_upper = state.natural_extreme
     state.phase = "secondary_reaction"
     state.last_secondary_reaction = low
@@ -254,15 +284,17 @@ def _process_waiting(state: _LedgerState, row: LedgerRow, high: float, low: floa
 def _process_up_trend(
     state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
 ) -> None:
+    extended = False
     if state.last_primary is None or high > state.last_primary:
         _write(row, "Upward Trend", high)
         state.last_primary = high
         if state.cycle_extreme is None or high >= state.cycle_extreme:
             state.cycle_extreme = high
             state.primary_extreme_date = row.trade_date
+        extended = True
 
     if state.cycle_extreme and low <= state.cycle_extreme * (1 - REVERSAL_PCT):
-        _open_natural_reaction(state, row, rows, low)
+        _open_natural_reaction(state, row, rows, low, same_day=extended)
 
 
 def _process_natural_reaction(
@@ -342,15 +374,17 @@ def _process_secondary_reaction(
 def _process_down_trend(
     state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
 ) -> None:
+    extended = False
     if state.last_primary is None or low < state.last_primary:
         _write(row, "Downward Trend", low)
         state.last_primary = low
         if state.cycle_extreme is None or low <= state.cycle_extreme:
             state.cycle_extreme = low
             state.primary_extreme_date = row.trade_date
+        extended = True
 
     if state.cycle_extreme and high >= state.cycle_extreme * (1 + REVERSAL_PCT):
-        _open_natural_rally(state, row, rows, high)
+        _open_natural_rally(state, row, rows, high, same_day=extended)
 
 
 def _process_natural_rally(

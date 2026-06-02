@@ -182,6 +182,35 @@ class LivermoreLedgerTests(unittest.TestCase):
         pivot_rows = [row for row in rows if "downward_trend" in row.pivotal]
         self.assertTrue(pivot_rows)
 
+    def test_same_day_up_extension_marks_pivot_on_trend_cell(self):
+        start = date(2024, 1, 1)
+        peak = 106.5
+        same_day_high = peak + 1
+        same_day_low = same_day_high * (1 - REVERSAL_PCT)
+        prices = _bootstrap_up(start, 100)
+        prices[1] = _price(start + timedelta(days=1), peak, 104, 105)
+        prices.append(_price(start + timedelta(days=2), same_day_high, same_day_low))
+        rows = build_ledger(prices)
+        day = rows[-1]
+        self.assertEqual(day.upward_trend, same_day_high)
+        self.assertEqual(day.natural_reaction, same_day_low)
+        self.assertIn("upward_trend", day.pivotal)
+        self.assertIn("Same day", day.note)
+
+    def test_same_day_down_extension_marks_pivot_on_trend_cell(self):
+        start = date(2024, 1, 1)
+        trough = 100 * (1 - REVERSAL_PCT - 0.005)
+        same_day_low = trough - 1
+        same_day_high = same_day_low * (1 + REVERSAL_PCT)
+        prices = _bootstrap_down(start, 100)
+        prices.append(_price(start + timedelta(days=2), same_day_high, same_day_low))
+        rows = build_ledger(prices)
+        day = rows[-1]
+        self.assertEqual(day.downward_trend, same_day_low)
+        self.assertEqual(day.natural_rally, same_day_high)
+        self.assertIn("downward_trend", day.pivotal)
+        self.assertIn("Same day", day.note)
+
 
 if __name__ == "__main__":
     unittest.main()

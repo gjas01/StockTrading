@@ -69,6 +69,12 @@ def compute_adjustment(
             message="Could not verify adjustment factor using two overlap days.",
         )
 
+    if abs(reference - 1.0) <= RATIO_TOLERANCE:
+        return AdjustmentResult(
+            needed=False,
+            message="Overlap prices match; no adjustment required.",
+        )
+
     return AdjustmentResult(
         needed=True,
         factor=reference,

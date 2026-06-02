@@ -26,11 +26,13 @@ class FetchResult:
 
 
 def _to_date(value) -> date:
+    if isinstance(value, datetime):
+        return value.date()
     if isinstance(value, date):
         return value
     if hasattr(value, "date"):
         return value.date()
-    return datetime.fromisoformat(str(value)).date()
+    return datetime.fromisoformat(str(value)[:10]).date()
 
 
 def _bars_to_dicts(bars: list[PriceBar]) -> list[dict]:

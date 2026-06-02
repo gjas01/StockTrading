@@ -110,10 +110,10 @@ def get_cursor() -> Iterator[Any]:
 
 
 def _parse_date(value) -> date:
-    if isinstance(value, date):
-        return value
     if isinstance(value, datetime):
         return value.date()
+    if isinstance(value, date):
+        return value
     if isinstance(value, str):
         return date.fromisoformat(value[:10])
     if hasattr(value, "date"):
@@ -136,11 +136,23 @@ def _row_to_dict(cursor, row) -> dict:
     return result
 
 
+def _odbc_param(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.replace(hour=0, minute=0, second=0, microsecond=0)
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def _odbc_params(params: tuple) -> tuple:
+    return tuple(_odbc_param(value) for value in params)
+
+
 def fetch_all(proc: str, params: tuple = ()) -> list[dict]:
     with get_cursor() as cursor:
         if params:
             placeholders = ", ".join("?" for _ in params)
-            cursor.execute(f"EXEC {proc} {placeholders}", params)
+            cursor.execute(f"EXEC {proc} {placeholders}", _odbc_params(params))
         else:
             cursor.execute(f"EXEC {proc}")
         if not cursor.description:

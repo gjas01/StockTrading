@@ -44,6 +44,22 @@ class AdjustmentTests(unittest.TestCase):
         result = compute_adjustment(stored, fetched)
         self.assertFalse(result.needed)
 
+    def test_no_adjustment_when_median_is_one_despite_one_outlier(self):
+        """One overlap day may drift (e.g. today's bar updated) while others match."""
+        stored = [
+            {"TradeDate": date(2024, 1, 2), "Close": 100.0},
+            {"TradeDate": date(2024, 1, 3), "Close": 101.0},
+            {"TradeDate": date(2024, 1, 4), "Close": 102.0},
+        ]
+        fetched = [
+            {"TradeDate": date(2024, 1, 2), "Close": 100.00005},
+            {"TradeDate": date(2024, 1, 3), "Close": 101.00004},
+            {"TradeDate": date(2024, 1, 4), "Close": 101.5},
+        ]
+        result = compute_adjustment(stored, fetched)
+        self.assertFalse(result.needed)
+        self.assertIn("no adjustment required", result.message.lower())
+
     def test_fetch_window_initial_and_overlap(self):
         today = date(2026, 5, 31)
         start, end = fetch_window(None, today)
