@@ -178,10 +178,15 @@ def country_list() -> list[dict]:
     return fetch_all("stocks.Country_List")
 
 
-def exchange_insert(country_id: int, name: str, yahoo_suffix: str = "") -> Optional[int]:
+def exchange_insert(
+    country_id: int,
+    name: str,
+    yahoo_suffix: str = "",
+    multiplier: float = 1.0,
+) -> Optional[int]:
     row = execute_proc(
         "stocks.Exchange_Insert",
-        (country_id, name, yahoo_suffix or None),
+        (country_id, name, yahoo_suffix or None, multiplier),
     )
     return int(row["ExchangeID"]) if row and row.get("ExchangeID") is not None else None
 

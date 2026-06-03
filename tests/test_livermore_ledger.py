@@ -1,7 +1,7 @@
 import unittest
 from datetime import date, timedelta
 
-from src.services.livermore_ledger import CONTINUATION_PCT, REVERSAL_PCT, build_ledger
+from src.services.livermore_ledger import CONTINUATION_PCT, REVERSAL_PCT, build_ledger, threshold_labels
 
 
 def _price(day: date, high: float, low: float, close: float | None = None) -> dict:
@@ -210,6 +210,30 @@ class LivermoreLedgerTests(unittest.TestCase):
         self.assertEqual(day.natural_rally, same_day_high)
         self.assertIn("downward_trend", day.pivotal)
         self.assertIn("Same day", day.note)
+
+    def test_multiplier_scales_threshold_labels(self):
+        self.assertEqual(threshold_labels(1.67), ("10.02%", "5.01%", "2.51%"))
+        self.assertEqual(threshold_labels(), ("6.00%", "3.00%", "1.50%"))
+
+    def test_multiplier_scales_reversal_threshold(self):
+        start = date(2024, 1, 1)
+        multiplier = 1.67
+        reversal = REVERSAL_PCT * multiplier
+        prices = [
+            _price(start, 100, 99, 100),
+            _price(start + timedelta(days=1), 100 * (1 + reversal - 0.001), 99, 100),
+        ]
+        rows = build_ledger(prices, multiplier=multiplier)
+        self.assertIsNone(rows[1].upward_trend)
+
+        prices[1] = _price(
+            start + timedelta(days=1),
+            100 * (1 + reversal + 0.001),
+            99,
+            100,
+        )
+        rows = build_ledger(prices, multiplier=multiplier)
+        self.assertIsNotNone(rows[1].upward_trend)
 
 
 if __name__ == "__main__":

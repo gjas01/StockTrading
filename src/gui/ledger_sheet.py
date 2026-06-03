@@ -8,7 +8,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from src import db
-from src.services.livermore_ledger import LedgerRow, build_ledger
+from src.services.livermore_ledger import LedgerRow, build_ledger, threshold_labels
 
 
 COLUMN_HEADERS = {
@@ -127,9 +127,13 @@ def build_pair_ledger_html(
     primary_title: str,
     primary_rows: list[LedgerRow],
     primary_count: int,
+    primary_reversal_label: str,
+    primary_continuation_label: str,
     secondary_title: str,
     secondary_rows: list[LedgerRow],
     secondary_count: int,
+    secondary_reversal_label: str,
+    secondary_continuation_label: str,
 ) -> str:
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -191,7 +195,8 @@ def build_pair_ledger_html(
 <body>
   <h1>{escape(pair_title)}</h1>
   <p class="intro">
-    Jesse Livermore Market Key ledger. Wait for 6% from the first close to establish trend.
+    Jesse Livermore Market Key ledger. Wait for {escape(primary_reversal_label)} / {escape(secondary_reversal_label)}
+    from the first close to establish trend (primary / secondary exchange thresholds).
     Blank cells = no new extreme. Underline = confirmed pivot only (upper after reaction opens,
     lower after rally opens). Blue / red = within 1.5% of upper / lower pivot.
   </p>
@@ -292,22 +297,24 @@ class LedgerSheetWindow(ttk.Frame):
 
         return _LedgerPanelWidgets(frame, title, subtitle, tree)
 
-    def _load_stock_ledger(self, stock_id: int, ticker: str, role: str) -> tuple[list[LedgerRow], int]:
+    def _load_stock_ledger(
+        self, stock_id: int, multiplier: float
+    ) -> tuple[list[LedgerRow], int, tuple[str, str, str]]:
         prices = db.stock_price_list(stock_id)
-        rows = build_ledger(prices)
-        return rows, len(prices)
+        rows = build_ledger(prices, multiplier=multiplier)
+        return rows, len(prices), threshold_labels(multiplier)
 
     def load_ledgers(self):
         try:
-            primary_rows, primary_count = self._load_stock_ledger(
+            primary_multiplier = float(self.pair.get("PrimaryExchangeMultiplier") or 1)
+            secondary_multiplier = float(self.pair.get("SecondaryExchangeMultiplier") or 1)
+            primary_rows, primary_count, primary_thresholds = self._load_stock_ledger(
                 int(self.pair["PrimaryStockID"]),
-                self.pair["PrimaryTicker"],
-                "Primary",
+                primary_multiplier,
             )
-            secondary_rows, secondary_count = self._load_stock_ledger(
+            secondary_rows, secondary_count, secondary_thresholds = self._load_stock_ledger(
                 int(self.pair["SecondaryStockID"]),
-                self.pair["SecondaryTicker"],
-                "Secondary",
+                secondary_multiplier,
             )
         except Exception as exc:
             self.status_var.configure(text=str(exc))
@@ -315,8 +322,20 @@ class LedgerSheetWindow(ttk.Frame):
 
         primary_title = f"Primary: {self.pair['PrimaryTicker']}"
         secondary_title = f"Secondary: {self.pair['SecondaryTicker']}"
-        self._populate_panel(self.primary_panel, primary_title, primary_rows, primary_count)
-        self._populate_panel(self.secondary_panel, secondary_title, secondary_rows, secondary_count)
+        self._populate_panel(
+            self.primary_panel,
+            primary_title,
+            primary_rows,
+            primary_count,
+            primary_thresholds,
+        )
+        self._populate_panel(
+            self.secondary_panel,
+            secondary_title,
+            secondary_rows,
+            secondary_count,
+            secondary_thresholds,
+        )
 
         pair_title = (
             f"Pair #{self.pair['PairID']}: {self.pair['PrimaryTicker']} / {self.pair['SecondaryTicker']}"
@@ -326,9 +345,13 @@ class LedgerSheetWindow(ttk.Frame):
             primary_title,
             primary_rows,
             primary_count,
+            primary_thresholds[0],
+            primary_thresholds[1],
             secondary_title,
             secondary_rows,
             secondary_count,
+            secondary_thresholds[0],
+            secondary_thresholds[1],
         )
         self.status_var.configure(
             text=(
@@ -337,15 +360,24 @@ class LedgerSheetWindow(ttk.Frame):
             )
         )
 
-    def _populate_panel(self, panel, title: str, rows: list[LedgerRow], price_count: int) -> None:
+    def _populate_panel(
+        self,
+        panel,
+        title: str,
+        rows: list[LedgerRow],
+        price_count: int,
+        threshold_text: tuple[str, str, str],
+    ) -> None:
         panel.title.configure(text=title)
         if not rows:
             panel.subtitle.configure(text="No price history. Pull prices for this stock first.")
         else:
+            reversal_label, continuation_label, near_pivot_label = threshold_text
             panel.subtitle.configure(
                 text=(
                     f"{price_count} trading day(s). "
-                    "6% trend / 3% continuation. * pivot  ^ upper  ! lower"
+                    f"{reversal_label} trend / {continuation_label} continuation / "
+                    f"{near_pivot_label} near pivot. * pivot  ^ upper  ! lower"
                 )
             )
 
