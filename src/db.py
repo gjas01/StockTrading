@@ -243,3 +243,7 @@ def pair_insert(primary_stock_id: int, secondary_stock_id: int) -> Optional[int]
 
 def pair_list() -> list[dict]:
     return fetch_all("stocks.Pair_List")
+
+
+def pair_delete(pair_id: int) -> None:
+    execute_proc("stocks.Pair_Delete", (pair_id,))

@@ -70,6 +70,7 @@ class PairTab(ttk.Frame):
         self.tree.column("primary", width=360, stretch=True)
         self.tree.column("secondary", width=360, stretch=True)
         self.tree.bind("<Double-1>", self.open_selected_ledger)
+        self.tree.bind("<Delete>", self.delete_selected_pair)
 
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -85,9 +86,16 @@ class PairTab(ttk.Frame):
             state="disabled",
         )
         self.open_button.pack(side="left")
+        self.delete_button = ttk.Button(
+            actions,
+            text="Delete Pair",
+            command=self.delete_selected_pair,
+            state="disabled",
+        )
+        self.delete_button.pack(side="left", padx=(8, 0))
         ttk.Label(
             actions,
-            text="Double-click a pair or select and open the printable Livermore ledger sheet.",
+            text="Double-click to open the ledger sheet. Select a pair and press Delete or use Delete Pair.",
         ).pack(side="left", padx=(12, 0))
 
         self.stocks = []
@@ -99,8 +107,10 @@ class PairTab(ttk.Frame):
     def _on_selection_changed(self, _event=None):
         if self.tree.selection():
             self.open_button.configure(state="normal")
+            self.delete_button.configure(state="normal")
         else:
             self.open_button.configure(state="disabled")
+            self.delete_button.configure(state="disabled")
 
     def refresh_stocks(self):
         try:
@@ -155,6 +165,36 @@ class PairTab(ttk.Frame):
         if not pair:
             return
         open_ledger_sheet(self.winfo_toplevel(), pair)
+
+    def delete_selected_pair(self, _event=None):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showwarning("Delete Pair", "Select a pair first.")
+            return "break" if _event is not None else None
+
+        pair = self.pairs_by_id.get(selection[0])
+        if not pair:
+            return "break" if _event is not None else None
+
+        primary, secondary = _pair_label(pair)
+        confirmed = messagebox.askyesno(
+            "Delete Pair",
+            f"Delete pair #{pair['PairID']}?\n\n"
+            f"Primary: {primary}\n"
+            f"Secondary: {secondary}\n\n"
+            "This cannot be undone.",
+            icon="warning",
+        )
+        if not confirmed:
+            return "break" if _event is not None else None
+
+        try:
+            db.pair_delete(int(pair["PairID"]))
+            self.refresh_list()
+        except Exception as exc:
+            messagebox.showerror("Error", str(exc))
+
+        return "break" if _event is not None else None
 
     def _stock_id_from_label(self, label: str) -> int | None:
         for stock in self.stocks:
