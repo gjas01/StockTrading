@@ -24,7 +24,10 @@ class StockTradingApp(tk.Tk):
             notebook,
             refresh_callbacks=[self.exchange_tab.refresh_countries],
         )
-        self.exchange_tab.refresh_callbacks = [self.stock_tab.refresh_exchanges]
+        self.exchange_tab.refresh_callbacks = [
+            self.stock_tab.refresh_exchanges,
+            self.pair_tab.refresh_list,
+        ]
         self.prices_tab = PricesTab(notebook)
 
         notebook.add(self.country_tab, text="Country")
@@ -41,6 +44,7 @@ class StockTradingApp(tk.Tk):
         self.exchange_tab.refresh_list()
         self.stock_tab.refresh_exchanges()
         self.stock_tab.refresh_list()
+        self.pair_tab.refresh_list()
 
 
 def main():

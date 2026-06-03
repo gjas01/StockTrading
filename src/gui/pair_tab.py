@@ -164,6 +164,9 @@ class PairTab(ttk.Frame):
         pair = self.pairs_by_id.get(selection[0])
         if not pair:
             return
+        fresh_pair = db.pair_get(int(pair["PairID"]))
+        if fresh_pair:
+            pair = fresh_pair
         open_ledger_sheet(self.winfo_toplevel(), pair)
 
     def delete_selected_pair(self, _event=None):

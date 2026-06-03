@@ -306,8 +306,9 @@ class LedgerSheetWindow(ttk.Frame):
 
     def load_ledgers(self):
         try:
-            primary_multiplier = float(self.pair.get("PrimaryExchangeMultiplier") or 1)
-            secondary_multiplier = float(self.pair.get("SecondaryExchangeMultiplier") or 1)
+            fresh_pair = db.pair_get(int(self.pair["PairID"])) or self.pair
+            primary_multiplier = float(fresh_pair.get("PrimaryExchangeMultiplier") or 1)
+            secondary_multiplier = float(fresh_pair.get("SecondaryExchangeMultiplier") or 1)
             primary_rows, primary_count, primary_thresholds = self._load_stock_ledger(
                 int(self.pair["PrimaryStockID"]),
                 primary_multiplier,

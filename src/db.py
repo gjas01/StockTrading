@@ -267,5 +267,12 @@ def pair_list() -> list[dict]:
     return fetch_all("stocks.Pair_List")
 
 
+def pair_get(pair_id: int) -> Optional[dict]:
+    for pair in pair_list():
+        if int(pair["PairID"]) == pair_id:
+            return pair
+    return None
+
+
 def pair_delete(pair_id: int) -> None:
     execute_proc("stocks.Pair_Delete", (pair_id,))
