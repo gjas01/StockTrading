@@ -4,6 +4,13 @@ from tkinter import messagebox, ttk
 from src import db
 
 
+def _stock_label(stock: dict) -> str:
+    return (
+        f"{stock['CountryName']} / {stock['ExchangeName']} / "
+        f"{stock['Ticker']} - {stock['FullName']}"
+    )
+
+
 class StockTab(ttk.Frame):
     def __init__(self, master, refresh_callbacks=None):
         super().__init__(master, padding=12)
@@ -47,15 +54,38 @@ class StockTab(ttk.Frame):
         self.tree.column("exchange", width=120, stretch=True)
         self.tree.column("ticker", width=80, stretch=False)
         self.tree.column("name", width=220, stretch=True)
+        self.tree.bind("<Delete>", self.delete_selected_stock)
 
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+        actions = ttk.Frame(self)
+        actions.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.delete_button = ttk.Button(
+            actions,
+            text="Delete Stock",
+            command=self.delete_selected_stock,
+            state="disabled",
+        )
+        self.delete_button.pack(side="left")
+        ttk.Label(
+            actions,
+            text="Select a stock and press Delete or use Delete Stock. Stocks used in a pair cannot be deleted.",
+        ).pack(side="left", padx=(12, 0))
+
         self.exchanges = []
+        self.stocks_by_id: dict[str, dict] = {}
+        self.tree.bind("<<TreeviewSelect>>", self._on_selection_changed)
         self.refresh_exchanges()
         self.refresh_list()
+
+    def _on_selection_changed(self, _event=None):
+        if self.tree.selection():
+            self.delete_button.configure(state="normal")
+        else:
+            self.delete_button.configure(state="disabled")
 
     def refresh_exchanges(self):
         try:
@@ -79,12 +109,20 @@ class StockTab(ttk.Frame):
             messagebox.showerror("Database Error", str(exc))
             stocks = []
 
+        selected = self.tree.selection()
+        selected_id = self.tree.item(selected[0])["values"][0] if selected else None
+
         for item in self.tree.get_children():
             self.tree.delete(item)
+        self.stocks_by_id.clear()
+
         for stock in stocks:
+            stock_id = str(stock["StockID"])
+            self.stocks_by_id[stock_id] = stock
             self.tree.insert(
                 "",
                 "end",
+                iid=stock_id,
                 values=(
                     stock["StockID"],
                     stock["CountryName"],
@@ -94,6 +132,13 @@ class StockTab(ttk.Frame):
                 ),
             )
 
+        if selected_id is not None and str(selected_id) in self.stocks_by_id:
+            self.tree.selection_set(str(selected_id))
+        elif self.tree.get_children():
+            self.tree.selection_set(self.tree.get_children()[0])
+
+        self._on_selection_changed()
+
     def _selected_exchange_id(self):
         label = self.exchange_var.get()
         for exchange in self.exchanges:
@@ -101,6 +146,37 @@ class StockTab(ttk.Frame):
             if current == label:
                 return int(exchange["ExchangeID"])
         return None
+
+    def delete_selected_stock(self, _event=None):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showwarning("Delete Stock", "Select a stock first.")
+            return "break" if _event is not None else None
+
+        stock = self.stocks_by_id.get(selection[0])
+        if not stock:
+            return "break" if _event is not None else None
+
+        label = _stock_label(stock)
+        confirmed = messagebox.askyesno(
+            "Delete Stock",
+            f"Delete stock #{stock['StockID']}?\n\n"
+            f"{label}\n\n"
+            "Price history for this stock will also be deleted. This cannot be undone.",
+            icon="warning",
+        )
+        if not confirmed:
+            return "break" if _event is not None else None
+
+        try:
+            db.stock_delete(int(stock["StockID"]))
+            self.refresh_list()
+            for callback in self.refresh_callbacks:
+                callback()
+        except Exception as exc:
+            messagebox.showerror("Cannot Delete Stock", str(exc))
+
+        return "break" if _event is not None else None
 
     def add_stock(self):
         exchange_id = self._selected_exchange_id()

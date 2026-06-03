@@ -197,6 +197,10 @@ def stock_insert(exchange_id: int, ticker: str, full_name: str) -> Optional[int]
     return int(row["StockID"]) if row and row.get("StockID") is not None else None
 
 
+def stock_delete(stock_id: int) -> None:
+    execute_proc("stocks.Stock_Delete", (stock_id,))
+
+
 def stock_list(exchange_id: Optional[int] = None) -> list[dict]:
     if exchange_id is None:
         return fetch_all("stocks.Stock_List")
