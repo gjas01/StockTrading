@@ -42,16 +42,28 @@ class ExchangeTab(ttk.Frame):
             text="Default 1. Scales 3%/6% ledger thresholds (e.g. 1.67 -> 5.01%/10.02%).",
         ).grid(row=5, column=1, sticky="w", padx=8)
 
-        ttk.Button(self, text="Add Exchange", command=self.add_exchange).grid(
-            row=6, column=1, sticky="e", pady=(12, 0)
+        buttons = ttk.Frame(self)
+        buttons.grid(row=6, column=1, sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="Clear Form", command=self.clear_form).pack(side="left", padx=(0, 8))
+        self.save_button = ttk.Button(
+            buttons,
+            text="Save Changes",
+            command=self.save_exchange,
+            state="disabled",
         )
+        self.save_button.pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="Add Exchange", command=self.add_exchange).pack(side="left")
 
         ttk.Label(self, text="Exchanges").grid(row=7, column=0, columnspan=2, sticky="w", pady=(16, 4))
+        ttk.Label(
+            self,
+            text="Select an exchange below to load it into the form for editing.",
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(0, 4))
 
         list_frame = ttk.Frame(self)
-        list_frame.grid(row=8, column=0, columnspan=2, sticky="nsew")
+        list_frame.grid(row=9, column=0, columnspan=2, sticky="nsew")
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(8, weight=1)
+        self.rowconfigure(9, weight=1)
 
         self.tree = ttk.Treeview(
             list_frame,
@@ -69,6 +81,7 @@ class ExchangeTab(ttk.Frame):
         self.tree.column("name", width=160, stretch=True)
         self.tree.column("suffix", width=100, stretch=False)
         self.tree.column("multiplier", width=90, stretch=False)
+        self.tree.bind("<<TreeviewSelect>>", self._on_selection_changed)
 
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -76,8 +89,35 @@ class ExchangeTab(ttk.Frame):
         scrollbar.pack(side="right", fill="y")
 
         self.countries = []
+        self.exchanges_by_id: dict[str, dict] = {}
         self.refresh_countries()
         self.refresh_list()
+
+    def _on_selection_changed(self, _event=None):
+        selection = self.tree.selection()
+        if not selection:
+            self.save_button.configure(state="disabled")
+            return
+
+        exchange = self.exchanges_by_id.get(selection[0])
+        if not exchange:
+            self.save_button.configure(state="disabled")
+            return
+
+        self.save_button.configure(state="normal")
+        self.country_var.set(exchange["CountryName"])
+        self.name_var.set(exchange["Name"])
+        self.suffix_var.set(exchange.get("YahooSuffix") or "")
+        self.multiplier_var.set(_format_multiplier(exchange.get("Multiplier")))
+
+    def clear_form(self):
+        self.tree.selection_remove(self.tree.selection())
+        self.name_var.set("")
+        self.suffix_var.set("")
+        self.multiplier_var.set("1")
+        if self.countries:
+            self.country_combo.current(0)
+        self.save_button.configure(state="disabled")
 
     def refresh_countries(self):
         try:
@@ -98,12 +138,20 @@ class ExchangeTab(ttk.Frame):
             messagebox.showerror("Database Error", str(exc))
             exchanges = []
 
+        selected = self.tree.selection()
+        selected_id = self.tree.item(selected[0])["values"][0] if selected else None
+
         for item in self.tree.get_children():
             self.tree.delete(item)
+        self.exchanges_by_id.clear()
+
         for exchange in exchanges:
+            exchange_id = str(exchange["ExchangeID"])
+            self.exchanges_by_id[exchange_id] = exchange
             self.tree.insert(
                 "",
                 "end",
+                iid=exchange_id,
                 values=(
                     exchange["ExchangeID"],
                     exchange["CountryName"],
@@ -112,6 +160,13 @@ class ExchangeTab(ttk.Frame):
                     _format_multiplier(exchange.get("Multiplier")),
                 ),
             )
+
+        if selected_id is not None and str(selected_id) in self.exchanges_by_id:
+            self.tree.selection_set(str(selected_id))
+        else:
+            self.save_button.configure(state="disabled")
+
+        self._on_selection_changed()
 
     def _selected_country_id(self):
         name = self.country_var.get()
@@ -134,30 +189,55 @@ class ExchangeTab(ttk.Frame):
             return None
         return multiplier
 
-    def add_exchange(self):
+    def _form_values(self) -> tuple[int, str, str, float] | None:
         country_id = self._selected_country_id()
         if country_id is None:
             messagebox.showwarning("Validation", "Select a country.")
-            return
+            return None
         name = self.name_var.get().strip()
         if not name:
             messagebox.showwarning("Validation", "Enter an exchange name.")
-            return
+            return None
         multiplier = self._parse_multiplier()
         if multiplier is None:
+            return None
+        return country_id, name, self.suffix_var.get().strip(), multiplier
+
+    def save_exchange(self):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showwarning("Validation", "Select an exchange to save.")
             return
+
+        values = self._form_values()
+        if values is None:
+            return
+
+        country_id, name, suffix, multiplier = values
+        exchange_id = int(selection[0])
         try:
-            exchange_id = db.exchange_insert(
-                country_id,
-                name,
-                self.suffix_var.get().strip(),
-                multiplier,
-            )
-            messagebox.showinfo("Success", f"Exchange added (ID {exchange_id}).")
-            self.name_var.set("")
-            self.suffix_var.set("")
-            self.multiplier_var.set("1")
+            db.exchange_update(exchange_id, country_id, name, suffix, multiplier)
+            messagebox.showinfo("Success", f"Exchange updated (ID {exchange_id}).")
             self.refresh_list()
+            self.tree.selection_set(str(exchange_id))
+            for callback in self.refresh_callbacks:
+                callback()
+        except Exception as exc:
+            messagebox.showerror("Error", str(exc))
+
+    def add_exchange(self):
+        values = self._form_values()
+        if values is None:
+            return
+
+        country_id, name, suffix, multiplier = values
+        try:
+            exchange_id = db.exchange_insert(country_id, name, suffix, multiplier)
+            messagebox.showinfo("Success", f"Exchange added (ID {exchange_id}).")
+            self.clear_form()
+            self.refresh_list()
+            if exchange_id is not None:
+                self.tree.selection_set(str(exchange_id))
             for callback in self.refresh_callbacks:
                 callback()
         except Exception as exc:

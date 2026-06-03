@@ -191,6 +191,19 @@ def exchange_insert(
     return int(row["ExchangeID"]) if row and row.get("ExchangeID") is not None else None
 
 
+def exchange_update(
+    exchange_id: int,
+    country_id: int,
+    name: str,
+    yahoo_suffix: str = "",
+    multiplier: float = 1.0,
+) -> None:
+    execute_proc(
+        "stocks.Exchange_Update",
+        (exchange_id, country_id, name, yahoo_suffix or None, multiplier),
+    )
+
+
 def exchange_list(country_id: Optional[int] = None) -> list[dict]:
     if country_id is None:
         return fetch_all("stocks.Exchange_List")
