@@ -4,10 +4,19 @@ from datetime import date, timedelta
 from src.services.livermore_ledger import CONTINUATION_PCT, REVERSAL_PCT, build_ledger, threshold_labels
 
 
-def _price(day: date, high: float, low: float, close: float | None = None) -> dict:
+def _price(
+    day: date,
+    high: float,
+    low: float,
+    close: float | None = None,
+    open: float | None = None,
+) -> dict:
     if close is None:
         close = (high + low) / 2
-    return {"TradeDate": day, "High": high, "Low": low, "Close": close}
+    row: dict = {"TradeDate": day, "High": high, "Low": low, "Close": close}
+    if open is not None:
+        row["Open"] = open
+    return row
 
 
 def _bootstrap_up(start: date, basis: float = 100.0) -> list[dict]:
@@ -203,7 +212,18 @@ class LivermoreLedgerTests(unittest.TestCase):
         same_day_low = trough - 1
         same_day_high = same_day_low * (1 + REVERSAL_PCT)
         prices = _bootstrap_down(start, 100)
-        prices.append(_price(start + timedelta(days=2), same_day_high, same_day_low))
+        # Bullish candle (close > open) so the low is processed first: the down trend extends
+        # to same_day_low, which becomes the new cycle extreme, and the high then triggers a
+        # natural rally on the same day.
+        prices.append(
+            _price(
+                start + timedelta(days=2),
+                same_day_high,
+                same_day_low,
+                close=same_day_high - 0.5,
+                open=same_day_low + 0.5,
+            )
+        )
         rows = build_ledger(prices)
         day = rows[-1]
         self.assertEqual(day.downward_trend, same_day_low)

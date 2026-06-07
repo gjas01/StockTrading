@@ -50,6 +50,7 @@ COLUMN_KEYS = {
 @dataclass
 class LedgerRow:
     trade_date: date
+    open: float
     high: float
     low: float
     close: float
@@ -313,241 +314,476 @@ def _flip_to_up_trend(state: _LedgerState, row: LedgerRow, high: float) -> None:
     )
 
 
-def _process_waiting(state: _LedgerState, row: LedgerRow, high: float, low: float) -> None:
-    if state.first_close is None:
-        state.first_close = float(row.close)
-        return
+def _candle_high_first(
+    open_price: float,
+    close: float,
+    high: float,
+    low: float,
+    trend: Literal["up", "down"] = "up",
+) -> bool:
+    """Return True if the high was reached before the low during the day.
 
-    basis = state.first_close
-    if high >= basis * (1 + state.thresholds.reversal):
-        _start_up_trend(state, row, high)
-        _append_note(
-            row,
-            f"Initial Up Trend (+{state.thresholds.label(state.thresholds.reversal)} above first close, day high)",
-        )
-    elif low <= basis * (1 - state.thresholds.reversal):
-        _start_down_trend(state, row, low)
-        _append_note(
-            row,
-            f"Initial Down Trend (-{state.thresholds.label(state.thresholds.reversal)} below first close, day low)",
-        )
+    Bearish candle (open > close): high came first, then low.
+    Bullish candle (close > open): low came first, then high.
+    Doji (open == close): position of close in day's range decides —
+      strictly below the midpoint → high first (bearish bias);
+      strictly above the midpoint → low first (bullish bias);
+      exactly at the midpoint → follow the current trend: up trend moves
+      high first (extending in-trend), down trend moves low first.
+    """
+    if open_price > close:
+        return True
+    if close > open_price:
+        return False
+    if high == low:
+        return True
+    midpoint = (high + low) / 2.0
+    if close < midpoint:
+        return True
+    if close > midpoint:
+        return False
+    # Exactly at midpoint: defer to trend direction.
+    return trend == "up"
 
 
-def _process_up_trend(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+def _open_secondary_rally_from_reaction(
+    state: _LedgerState, row: LedgerRow, high: float
 ) -> None:
-    extended = False
-    if state.last_primary is None or high > state.last_primary:
-        _write(row, "Upward Trend", high)
-        state.last_primary = high
-        if state.cycle_extreme is None or high >= state.cycle_extreme:
-            state.cycle_extreme = high
-            state.primary_extreme_date = row.trade_date
-        extended = True
-
-    if state.cycle_extreme and low <= state.cycle_extreme * (1 - state.thresholds.reversal):
-        _open_natural_reaction(state, row, rows, low, same_day=extended)
-
-
-def _process_natural_reaction(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
-) -> None:
-    if state.last_natural is None or low < state.last_natural:
-        _write(row, "Natural Reaction", low)
-        state.last_natural = low
-        state.natural_extreme = low
-        state.natural_extreme_date = row.trade_date
-
-    if state.natural_extreme and high >= state.natural_extreme * (1 + state.thresholds.continuation):
-        _open_secondary_rally(state, row, rows, high)
-
-
-def _process_secondary_rally(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
-) -> None:
-    if state.pivot_upper and high >= state.pivot_upper * (1 + state.thresholds.continuation):
-        _resume_up_trend(state, row, high)
-        return
-
-    if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
-        _flip_to_down_trend(state, row, low)
-        return
-
-    if state.secondary_rally_extreme and low <= state.secondary_rally_extreme * (
-        1 - state.thresholds.continuation
-    ):
-        state.sr_peak_before_reaction = state.secondary_rally_extreme
-        state.phase = "secondary_reaction"
-        state.last_secondary_reaction = low
-        state.secondary_reaction_extreme = low
-        _write(row, "Secondary Reaction", low)
-        _maybe_red_secondary_reaction(row, state, low)
-        _append_note(
-            row,
-            f"Secondary Reaction (-{state.thresholds.label(state.thresholds.continuation)} below secondary rally high)",
-        )
-        return
-
-    if state.last_secondary_rally is None or high > state.last_secondary_rally:
+    """Transition from secondary_reaction back to secondary_rally."""
+    state.phase = "secondary_rally"
+    prior_peak = state.sr_peak_before_reaction or 0.0
+    if high > prior_peak:
         _write(row, "Secondary Rally", high)
         state.last_secondary_rally = high
         state.secondary_rally_extreme = high
-        _maybe_blue_secondary_rally(row, state, high)
-
-
-def _process_secondary_reaction(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
-) -> None:
-    if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
-        _flip_to_down_trend(state, row, low)
-        return
-
-    if state.last_secondary_reaction is None or low < state.last_secondary_reaction:
-        _write(row, "Secondary Reaction", low)
-        state.last_secondary_reaction = low
-        state.secondary_reaction_extreme = low
-        _maybe_red_secondary_reaction(row, state, low)
-
-    threshold = (state.last_secondary_reaction or low) * (1 + state.thresholds.continuation)
-    if high >= threshold and not (
-        state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation)
-    ):
-        state.phase = "secondary_rally"
-        prior_peak = state.sr_peak_before_reaction or 0.0
-        if high > prior_peak:
-            _write(row, "Secondary Rally", high)
-            state.last_secondary_rally = high
-            state.secondary_rally_extreme = high
-            _maybe_blue_secondary_rally(row, state, high)
-            _append_note(
-                row,
-                f"Secondary Rally resumed (+{state.thresholds.label(state.thresholds.continuation)} from secondary reaction low)",
-            )
-        else:
-            state.last_secondary_rally = high
-            state.secondary_rally_extreme = high
-            _write(row, "Secondary Rally", high)
-            _maybe_blue_secondary_rally(row, state, high)
-            _append_note(row, "Secondary Rally resumed (below prior peak)")
-
-
-def _process_down_trend(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
-) -> None:
-    extended = False
-    if state.last_primary is None or low < state.last_primary:
-        _write(row, "Downward Trend", low)
-        state.last_primary = low
-        if state.cycle_extreme is None or low <= state.cycle_extreme:
-            state.cycle_extreme = low
-            state.primary_extreme_date = row.trade_date
-        extended = True
-
-    if state.cycle_extreme and high >= state.cycle_extreme * (1 + state.thresholds.reversal):
-        _open_natural_rally(state, row, rows, high, same_day=extended)
-
-
-def _process_natural_rally(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
-) -> None:
-    if state.last_natural is None or high > state.last_natural:
-        _write(row, "Natural Rally", high)
-        state.last_natural = high
-        state.natural_extreme = high
-        state.natural_extreme_date = row.trade_date
-
-    if state.natural_extreme and low <= state.natural_extreme * (1 - state.thresholds.continuation):
-        _open_secondary_reaction_down(state, row, rows, low)
-
-
-def _process_secondary_reaction_down(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
-) -> None:
-    if state.pivot_upper and high >= state.pivot_upper * (1 + state.thresholds.continuation):
-        _flip_to_up_trend(state, row, high)
-        return
-
-    if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
-        _resume_down_trend(state, row, low)
-        return
-
-    if state.last_secondary_reaction is None or low < state.last_secondary_reaction:
-        _write(row, "Secondary Reaction", low)
-        state.last_secondary_reaction = low
-        state.secondary_reaction_extreme = low
-        _maybe_red_secondary_reaction(row, state, low)
-
-    threshold = (state.last_secondary_reaction or low) * (1 + state.thresholds.continuation)
-    if high >= threshold and not (
-        state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation)
-    ):
-        state.phase = "secondary_rally"
-        state.last_secondary_rally = high
-        state.secondary_rally_extreme = high
-        _write(row, "Secondary Rally", high)
         _maybe_blue_secondary_rally(row, state, high)
         _append_note(
             row,
             f"Secondary Rally resumed (+{state.thresholds.label(state.thresholds.continuation)} from secondary reaction low)",
         )
+    else:
+        state.last_secondary_rally = high
+        state.secondary_rally_extreme = high
+        _write(row, "Secondary Rally", high)
+        _maybe_blue_secondary_rally(row, state, high)
+        _append_note(row, "Secondary Rally resumed (below prior peak)")
+
+
+def _process_waiting(
+    state: _LedgerState, row: LedgerRow, high: float, low: float, high_first: bool
+) -> None:
+    if state.first_close is None:
+        state.first_close = float(row.close)
+        return
+
+    basis = state.first_close
+    if high_first:
+        if high >= basis * (1 + state.thresholds.reversal):
+            _start_up_trend(state, row, high)
+            _append_note(
+                row,
+                f"Initial Up Trend (+{state.thresholds.label(state.thresholds.reversal)} above first close, day high)",
+            )
+        elif low <= basis * (1 - state.thresholds.reversal):
+            _start_down_trend(state, row, low)
+            _append_note(
+                row,
+                f"Initial Down Trend (-{state.thresholds.label(state.thresholds.reversal)} below first close, day low)",
+            )
+    else:
+        if low <= basis * (1 - state.thresholds.reversal):
+            _start_down_trend(state, row, low)
+            _append_note(
+                row,
+                f"Initial Down Trend (-{state.thresholds.label(state.thresholds.reversal)} below first close, day low)",
+            )
+        elif high >= basis * (1 + state.thresholds.reversal):
+            _start_up_trend(state, row, high)
+            _append_note(
+                row,
+                f"Initial Up Trend (+{state.thresholds.label(state.thresholds.reversal)} above first close, day high)",
+            )
+
+
+def _process_up_trend(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float, high_first: bool
+) -> None:
+    if high_first:
+        # Bearish candle: high came first — extend trend on high, then check low for reversal
+        # against the (possibly updated) cycle extreme.
+        extended = False
+        if state.last_primary is None or high > state.last_primary:
+            _write(row, "Upward Trend", high)
+            state.last_primary = high
+            if state.cycle_extreme is None or high >= state.cycle_extreme:
+                state.cycle_extreme = high
+                state.primary_extreme_date = row.trade_date
+            extended = True
+
+        if state.cycle_extreme and low <= state.cycle_extreme * (1 - state.thresholds.reversal):
+            _open_natural_reaction(state, row, rows, low, same_day=extended)
+    else:
+        # Bullish candle: low came first — check low against the current cycle extreme for a
+        # reversal before the high has a chance to extend.  If the reversal fires we stop; the
+        # high extension never happened yet, so same_day=False.
+        if state.cycle_extreme and low <= state.cycle_extreme * (1 - state.thresholds.reversal):
+            _open_natural_reaction(state, row, rows, low, same_day=False)
+            return
+
+        if state.last_primary is None or high > state.last_primary:
+            _write(row, "Upward Trend", high)
+            state.last_primary = high
+            if state.cycle_extreme is None or high >= state.cycle_extreme:
+                state.cycle_extreme = high
+                state.primary_extreme_date = row.trade_date
+
+
+def _process_natural_reaction(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float, high_first: bool
+) -> None:
+    if high_first:
+        # Bearish candle: high came first — check for a secondary rally reversal before
+        # recording any new reaction low.
+        if state.natural_extreme and high >= state.natural_extreme * (1 + state.thresholds.continuation):
+            _open_secondary_rally(state, row, rows, high)
+            return
+
+        if state.last_natural is None or low < state.last_natural:
+            _write(row, "Natural Reaction", low)
+            state.last_natural = low
+            state.natural_extreme = low
+            state.natural_extreme_date = row.trade_date
+    else:
+        # Bullish candle: low came first — extend the reaction, then check the high for a
+        # secondary rally against the (possibly updated) natural extreme.
+        if state.last_natural is None or low < state.last_natural:
+            _write(row, "Natural Reaction", low)
+            state.last_natural = low
+            state.natural_extreme = low
+            state.natural_extreme_date = row.trade_date
+
+        if state.natural_extreme and high >= state.natural_extreme * (1 + state.thresholds.continuation):
+            _open_secondary_rally(state, row, rows, high)
+
+
+def _process_secondary_rally(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float, high_first: bool
+) -> None:
+    if high_first:
+        # Bearish: high-driven events first, then low-driven events.
+        if state.pivot_upper and high >= state.pivot_upper * (1 + state.thresholds.continuation):
+            _resume_up_trend(state, row, high)
+            return
+
+        if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
+            _flip_to_down_trend(state, row, low)
+            return
+
+        if state.secondary_rally_extreme and low <= state.secondary_rally_extreme * (
+            1 - state.thresholds.continuation
+        ):
+            state.sr_peak_before_reaction = state.secondary_rally_extreme
+            state.phase = "secondary_reaction"
+            state.last_secondary_reaction = low
+            state.secondary_reaction_extreme = low
+            _write(row, "Secondary Reaction", low)
+            _maybe_red_secondary_reaction(row, state, low)
+            _append_note(
+                row,
+                f"Secondary Reaction (-{state.thresholds.label(state.thresholds.continuation)} below secondary rally high)",
+            )
+            return
+
+        if state.last_secondary_rally is None or high > state.last_secondary_rally:
+            _write(row, "Secondary Rally", high)
+            state.last_secondary_rally = high
+            state.secondary_rally_extreme = high
+            _maybe_blue_secondary_rally(row, state, high)
+    else:
+        # Bullish: low-driven events first, then high-driven events.
+        if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
+            _flip_to_down_trend(state, row, low)
+            return
+
+        if state.secondary_rally_extreme and low <= state.secondary_rally_extreme * (
+            1 - state.thresholds.continuation
+        ):
+            state.sr_peak_before_reaction = state.secondary_rally_extreme
+            state.phase = "secondary_reaction"
+            state.last_secondary_reaction = low
+            state.secondary_reaction_extreme = low
+            _write(row, "Secondary Reaction", low)
+            _maybe_red_secondary_reaction(row, state, low)
+            _append_note(
+                row,
+                f"Secondary Reaction (-{state.thresholds.label(state.thresholds.continuation)} below secondary rally high)",
+            )
+            return
+
+        if state.pivot_upper and high >= state.pivot_upper * (1 + state.thresholds.continuation):
+            _resume_up_trend(state, row, high)
+            return
+
+        if state.last_secondary_rally is None or high > state.last_secondary_rally:
+            _write(row, "Secondary Rally", high)
+            state.last_secondary_rally = high
+            state.secondary_rally_extreme = high
+            _maybe_blue_secondary_rally(row, state, high)
+
+
+def _process_secondary_reaction(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float, high_first: bool
+) -> None:
+    if high_first:
+        # Bearish: check high for secondary rally first, against the current
+        # last_secondary_reaction (before any new low extends it).
+        threshold = (state.last_secondary_reaction or low) * (1 + state.thresholds.continuation)
+        if high >= threshold:
+            _open_secondary_rally_from_reaction(state, row, high)
+            return
+
+        if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
+            _flip_to_down_trend(state, row, low)
+            return
+
+        if state.last_secondary_reaction is None or low < state.last_secondary_reaction:
+            _write(row, "Secondary Reaction", low)
+            state.last_secondary_reaction = low
+            state.secondary_reaction_extreme = low
+            _maybe_red_secondary_reaction(row, state, low)
+    else:
+        # Bullish: low comes first — extend the reaction, then check high for secondary rally
+        # against the (possibly updated) last_secondary_reaction.
+        if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
+            _flip_to_down_trend(state, row, low)
+            return
+
+        if state.last_secondary_reaction is None or low < state.last_secondary_reaction:
+            _write(row, "Secondary Reaction", low)
+            state.last_secondary_reaction = low
+            state.secondary_reaction_extreme = low
+            _maybe_red_secondary_reaction(row, state, low)
+
+        threshold = (state.last_secondary_reaction or low) * (1 + state.thresholds.continuation)
+        if high >= threshold and not (
+            state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation)
+        ):
+            _open_secondary_rally_from_reaction(state, row, high)
+
+
+def _process_down_trend(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float, high_first: bool
+) -> None:
+    if high_first:
+        # Bearish candle: high came first — check high for a reversal (natural rally) before
+        # the low has a chance to extend the trend.  If it fires we stop; no extension happened
+        # yet, so same_day=False.
+        if state.cycle_extreme and high >= state.cycle_extreme * (1 + state.thresholds.reversal):
+            _open_natural_rally(state, row, rows, high, same_day=False)
+            return
+
+        if state.last_primary is None or low < state.last_primary:
+            _write(row, "Downward Trend", low)
+            state.last_primary = low
+            if state.cycle_extreme is None or low <= state.cycle_extreme:
+                state.cycle_extreme = low
+                state.primary_extreme_date = row.trade_date
+    else:
+        # Bullish candle: low came first — extend trend on low, then check high for reversal
+        # against the (possibly updated) cycle extreme.
+        extended = False
+        if state.last_primary is None or low < state.last_primary:
+            _write(row, "Downward Trend", low)
+            state.last_primary = low
+            if state.cycle_extreme is None or low <= state.cycle_extreme:
+                state.cycle_extreme = low
+                state.primary_extreme_date = row.trade_date
+            extended = True
+
+        if state.cycle_extreme and high >= state.cycle_extreme * (1 + state.thresholds.reversal):
+            _open_natural_rally(state, row, rows, high, same_day=extended)
+
+
+def _process_natural_rally(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float, high_first: bool
+) -> None:
+    if not high_first:
+        # Bullish candle: low came first — check for a secondary reaction reversal before
+        # recording any new rally high.
+        if state.natural_extreme and low <= state.natural_extreme * (1 - state.thresholds.continuation):
+            _open_secondary_reaction_down(state, row, rows, low)
+            return
+
+        if state.last_natural is None or high > state.last_natural:
+            _write(row, "Natural Rally", high)
+            state.last_natural = high
+            state.natural_extreme = high
+            state.natural_extreme_date = row.trade_date
+    else:
+        # Bearish candle: high came first — extend the rally, then check the low for a
+        # secondary reaction against the (possibly updated) natural extreme.
+        if state.last_natural is None or high > state.last_natural:
+            _write(row, "Natural Rally", high)
+            state.last_natural = high
+            state.natural_extreme = high
+            state.natural_extreme_date = row.trade_date
+
+        if state.natural_extreme and low <= state.natural_extreme * (1 - state.thresholds.continuation):
+            _open_secondary_reaction_down(state, row, rows, low)
+
+
+def _process_secondary_reaction_down(
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float, high_first: bool
+) -> None:
+    if high_first:
+        # Bearish: high-driven events first, then low-driven events.
+        if state.pivot_upper and high >= state.pivot_upper * (1 + state.thresholds.continuation):
+            _flip_to_up_trend(state, row, high)
+            return
+
+        # Check secondary rally trigger against current last_secondary_reaction (before low extends).
+        threshold = (state.last_secondary_reaction or low) * (1 + state.thresholds.continuation)
+        if high >= threshold:
+            state.phase = "secondary_rally"
+            state.last_secondary_rally = high
+            state.secondary_rally_extreme = high
+            _write(row, "Secondary Rally", high)
+            _maybe_blue_secondary_rally(row, state, high)
+            _append_note(
+                row,
+                f"Secondary Rally resumed (+{state.thresholds.label(state.thresholds.continuation)} from secondary reaction low)",
+            )
+            return
+
+        if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
+            _resume_down_trend(state, row, low)
+            return
+
+        if state.last_secondary_reaction is None or low < state.last_secondary_reaction:
+            _write(row, "Secondary Reaction", low)
+            state.last_secondary_reaction = low
+            state.secondary_reaction_extreme = low
+            _maybe_red_secondary_reaction(row, state, low)
+    else:
+        # Bullish: low comes first — extend reaction, then check high for flip or secondary rally
+        # against the (possibly updated) last_secondary_reaction.
+        if state.pivot_upper and high >= state.pivot_upper * (1 + state.thresholds.continuation):
+            _flip_to_up_trend(state, row, high)
+            return
+
+        if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
+            _resume_down_trend(state, row, low)
+            return
+
+        if state.last_secondary_reaction is None or low < state.last_secondary_reaction:
+            _write(row, "Secondary Reaction", low)
+            state.last_secondary_reaction = low
+            state.secondary_reaction_extreme = low
+            _maybe_red_secondary_reaction(row, state, low)
+
+        threshold = (state.last_secondary_reaction or low) * (1 + state.thresholds.continuation)
+        if high >= threshold and not (
+            state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation)
+        ):
+            state.phase = "secondary_rally"
+            state.last_secondary_rally = high
+            state.secondary_rally_extreme = high
+            _write(row, "Secondary Rally", high)
+            _maybe_blue_secondary_rally(row, state, high)
+            _append_note(
+                row,
+                f"Secondary Rally resumed (+{state.thresholds.label(state.thresholds.continuation)} from secondary reaction low)",
+            )
 
 
 def _process_secondary_rally_down(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float, high_first: bool
 ) -> None:
-    if state.pivot_upper and high >= state.pivot_upper * (1 + state.thresholds.continuation):
-        _flip_to_up_trend(state, row, high)
-        return
+    if high_first:
+        # Bearish: high-driven events first, then low-driven events.
+        if state.pivot_upper and high >= state.pivot_upper * (1 + state.thresholds.continuation):
+            _flip_to_up_trend(state, row, high)
+            return
 
-    if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
-        _resume_down_trend(state, row, low)
-        return
+        if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
+            _resume_down_trend(state, row, low)
+            return
 
-    if state.secondary_rally_extreme and low <= state.secondary_rally_extreme * (
-        1 - state.thresholds.continuation
-    ):
-        state.sr_peak_before_reaction = state.secondary_rally_extreme
-        state.phase = "secondary_reaction"
-        state.last_secondary_reaction = low
-        state.secondary_reaction_extreme = low
-        _write(row, "Secondary Reaction", low)
-        _maybe_red_secondary_reaction(row, state, low)
-        _append_note(
-            row,
-            f"Secondary Reaction (-{state.thresholds.label(state.thresholds.continuation)} below secondary rally high)",
-        )
-        return
+        if state.secondary_rally_extreme and low <= state.secondary_rally_extreme * (
+            1 - state.thresholds.continuation
+        ):
+            state.sr_peak_before_reaction = state.secondary_rally_extreme
+            state.phase = "secondary_reaction"
+            state.last_secondary_reaction = low
+            state.secondary_reaction_extreme = low
+            _write(row, "Secondary Reaction", low)
+            _maybe_red_secondary_reaction(row, state, low)
+            _append_note(
+                row,
+                f"Secondary Reaction (-{state.thresholds.label(state.thresholds.continuation)} below secondary rally high)",
+            )
+            return
 
-    if state.last_secondary_rally is None or high > state.last_secondary_rally:
-        _write(row, "Secondary Rally", high)
-        state.last_secondary_rally = high
-        state.secondary_rally_extreme = high
-        _maybe_blue_secondary_rally(row, state, high)
+        if state.last_secondary_rally is None or high > state.last_secondary_rally:
+            _write(row, "Secondary Rally", high)
+            state.last_secondary_rally = high
+            state.secondary_rally_extreme = high
+            _maybe_blue_secondary_rally(row, state, high)
+    else:
+        # Bullish: low-driven events first, then high-driven events.
+        if state.pivot_lower and low <= state.pivot_lower * (1 - state.thresholds.continuation):
+            _resume_down_trend(state, row, low)
+            return
+
+        if state.secondary_rally_extreme and low <= state.secondary_rally_extreme * (
+            1 - state.thresholds.continuation
+        ):
+            state.sr_peak_before_reaction = state.secondary_rally_extreme
+            state.phase = "secondary_reaction"
+            state.last_secondary_reaction = low
+            state.secondary_reaction_extreme = low
+            _write(row, "Secondary Reaction", low)
+            _maybe_red_secondary_reaction(row, state, low)
+            _append_note(
+                row,
+                f"Secondary Reaction (-{state.thresholds.label(state.thresholds.continuation)} below secondary rally high)",
+            )
+            return
+
+        if state.pivot_upper and high >= state.pivot_upper * (1 + state.thresholds.continuation):
+            _flip_to_up_trend(state, row, high)
+            return
+
+        if state.last_secondary_rally is None or high > state.last_secondary_rally:
+            _write(row, "Secondary Rally", high)
+            state.last_secondary_rally = high
+            state.secondary_rally_extreme = high
+            _maybe_blue_secondary_rally(row, state, high)
 
 
 def _process_day(
-    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float
+    state: _LedgerState, row: LedgerRow, rows: list[LedgerRow], high: float, low: float, high_first: bool
 ) -> None:
     if state.phase == "waiting":
-        _process_waiting(state, row, high, low)
+        _process_waiting(state, row, high, low, high_first)
     elif state.phase == "up_trend":
-        _process_up_trend(state, row, rows, high, low)
+        _process_up_trend(state, row, rows, high, low, high_first)
     elif state.phase == "natural_reaction":
-        _process_natural_reaction(state, row, rows, high, low)
+        _process_natural_reaction(state, row, rows, high, low, high_first)
     elif state.phase == "secondary_rally":
         if state.trend == "up":
-            _process_secondary_rally(state, row, rows, high, low)
+            _process_secondary_rally(state, row, rows, high, low, high_first)
         else:
-            _process_secondary_rally_down(state, row, rows, high, low)
+            _process_secondary_rally_down(state, row, rows, high, low, high_first)
     elif state.phase == "secondary_reaction":
         if state.trend == "up":
-            _process_secondary_reaction(state, row, rows, high, low)
+            _process_secondary_reaction(state, row, rows, high, low, high_first)
         else:
-            _process_secondary_reaction_down(state, row, rows, high, low)
+            _process_secondary_reaction_down(state, row, rows, high, low, high_first)
     elif state.phase == "down_trend":
-        _process_down_trend(state, row, rows, high, low)
+        _process_down_trend(state, row, rows, high, low, high_first)
     elif state.phase == "natural_rally":
-        _process_natural_rally(state, row, rows, high, low)
+        _process_natural_rally(state, row, rows, high, low, high_first)
 
 
 def build_ledger(prices: list[dict], multiplier: float = 1.0) -> list[LedgerRow]:
@@ -563,8 +799,20 @@ def build_ledger(prices: list[dict], multiplier: float = 1.0) -> list[LedgerRow]
         high = float(price_row["High"])
         low = float(price_row["Low"])
         close = float(price_row["Close"])
-        ledger_row = LedgerRow(trade_date=trade_date, high=high, low=low, close=close)
-        _process_day(state, ledger_row, rows, high, low)
+        open_price = float(
+            price_row["Open"]
+            if price_row.get("Open") is not None
+            else (high + low) / 2.0
+        )
+        ledger_row = LedgerRow(
+            trade_date=trade_date,
+            open=open_price,
+            high=high,
+            low=low,
+            close=close,
+        )
+        high_first = _candle_high_first(open_price, close, high, low, state.trend)
+        _process_day(state, ledger_row, rows, high, low, high_first)
         rows.append(ledger_row)
 
     return rows
