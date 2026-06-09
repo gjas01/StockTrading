@@ -276,3 +276,28 @@ def pair_get(pair_id: int) -> Optional[dict]:
 
 def pair_delete(pair_id: int) -> None:
     execute_proc("stocks.Pair_Delete", (pair_id,))
+
+
+# ---------------------------------------------------------------------------
+# Stock groups (3-stock named groups replacing 2-stock pairs)
+# Backed by stocks.StockGroup table; see db_migrations/create_groups.sql.
+# ---------------------------------------------------------------------------
+
+def group_insert(name: str, stock1_id: int, stock2_id: int, stock3_id: int) -> Optional[int]:
+    row = execute_proc("stocks.Group_Insert", (name, stock1_id, stock2_id, stock3_id))
+    return int(row["GroupID"]) if row and row.get("GroupID") is not None else None
+
+
+def group_list() -> list[dict]:
+    return fetch_all("stocks.Group_List")
+
+
+def group_get(group_id: int) -> Optional[dict]:
+    for group in group_list():
+        if int(group["GroupID"]) == group_id:
+            return group
+    return None
+
+
+def group_delete(group_id: int) -> None:
+    execute_proc("stocks.Group_Delete", (group_id,))
