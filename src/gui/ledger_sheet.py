@@ -8,7 +8,12 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from src import db
-from src.services.livermore_ledger import LedgerRow, build_ledger, threshold_labels
+from src.services.livermore_ledger import (
+    LedgerRow,
+    build_ledger,
+    primary_trend,
+    threshold_labels,
+)
 
 
 COLUMN_HEADERS = {
@@ -343,6 +348,40 @@ def _export_to_excel(
 
 
 # ---------------------------------------------------------------------------
+# Group direction helpers
+# ---------------------------------------------------------------------------
+
+def _group_direction(
+    all_rows: list[list[LedgerRow]],
+) -> str:
+    """Return "up", "down", or "mixed" based on a majority vote of the primary
+    trend for each stock in the group.  Stocks with no established trend (still
+    in the waiting phase) are counted as abstentions and do not affect the vote.
+    """
+    up = sum(1 for rows in all_rows if primary_trend(rows) == "up")
+    down = sum(1 for rows in all_rows if primary_trend(rows) == "down")
+    if up > down:
+        return "up"
+    if down > up:
+        return "down"
+    if up == 0 and down == 0:
+        return "unknown"
+    return "mixed"
+
+
+def _direction_label(direction: str) -> str:
+    return {"up": "▲ Up", "down": "▼ Down", "mixed": "~ Mixed", "unknown": "? Unknown"}.get(
+        direction, direction
+    )
+
+
+def _direction_colour(direction: str) -> str:
+    return {"up": "#0b6b2e", "down": "#b00020", "mixed": "#7f5c00", "unknown": "#555555"}.get(
+        direction, "#111111"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Ledger panel widget
 # ---------------------------------------------------------------------------
 
@@ -377,9 +416,10 @@ class LedgerSheetWindow(ttk.Frame):
         # ── Toolbar ───────────────────────────────────────────────────────
         toolbar = ttk.Frame(self)
         toolbar.pack(fill="x", pady=(0, 8))
-        ttk.Label(
+        self.title_label = ttk.Label(
             toolbar, text=window_title, font=("Segoe UI", 11, "bold")
-        ).pack(side="left")
+        )
+        self.title_label.pack(side="left")
         ttk.Button(
             toolbar, text="Export to Excel", command=self._export_excel
         ).pack(side="right", padx=(6, 0))
@@ -489,7 +529,14 @@ class LedgerSheetWindow(ttk.Frame):
 
         group_name  = group.get("GroupName", f"Group #{group['GroupID']}")
         tickers     = " / ".join(t for t, _, _, _ in self._stocks_data)
-        group_title = f"{group_name}: {tickers}"
+
+        group_direction = _group_direction([rows for _, rows, _, _ in self._stocks_data])
+        direction_tag   = _direction_label(group_direction)
+        self.title_label.configure(
+            text=f"{group_name}  ({tickers})  {direction_tag}",
+            foreground=_direction_colour(group_direction),
+        )
+        group_title = f"{group_name} [{direction_tag}]: {tickers}"
 
         html_stocks = [
             (title, rows, count, thresholds[0], thresholds[1])

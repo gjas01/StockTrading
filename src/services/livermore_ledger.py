@@ -825,3 +825,19 @@ def threshold_labels(multiplier: float = 1.0) -> tuple[str, str, str]:
         thresholds.label(thresholds.continuation),
         thresholds.label(thresholds.near_pivot),
     )
+
+
+def primary_trend(rows: list[LedgerRow]) -> Literal["up", "down"] | None:
+    """Return the primary trend direction based on the most recently recorded
+    Upward Trend or Downward Trend entry.
+
+    Scans the ledger rows in reverse and returns "up" or "down" as soon as an
+    entry is found in either of those columns.  Returns ``None`` if no primary
+    trend has been established yet (ledger still in the waiting phase).
+    """
+    for row in reversed(rows):
+        if row.upward_trend is not None:
+            return "up"
+        if row.downward_trend is not None:
+            return "down"
+    return None
