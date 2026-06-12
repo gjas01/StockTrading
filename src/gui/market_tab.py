@@ -149,12 +149,13 @@ class MarketTab(ttk.Frame):
         total_score = 0
 
         for group_name, stock_trends in result_rows:
-            scores = [_trend_score(trend) for _, trend in stock_trends]
-            group_score = sum(scores)
-            total_score += group_score
+            raw_sum = sum(_trend_score(trend) for _, trend in stock_trends)
+            # Group rating is always +1, -1, or 0 (majority direction, not raw sum)
+            group_rating = 1 if raw_sum > 0 else (-1 if raw_sum < 0 else 0)
+            total_score += group_rating
 
-            tag = "up" if group_score > 0 else ("down" if group_score < 0 else "neutral")
-            direction = _direction_symbol(group_score)
+            tag = "up" if group_rating > 0 else ("down" if group_rating < 0 else "neutral")
+            direction = _direction_symbol(group_rating)
 
             cells = [
                 _trend_cell(ticker, trend) for ticker, trend in stock_trends
@@ -171,7 +172,7 @@ class MarketTab(ttk.Frame):
                     cells[0],
                     cells[1],
                     cells[2],
-                    f"{group_score:+d}" if group_score != 0 else "0",
+                    f"{group_rating:+d}" if group_rating != 0 else "0",
                     direction,
                 ),
                 tags=(tag,),
