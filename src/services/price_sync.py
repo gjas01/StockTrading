@@ -6,6 +6,8 @@ from src import db
 from src.services.adjustment import compute_adjustment, fetch_window
 from src.services.price_fetcher import FetchResult, bars_to_dicts, fetch_prices
 
+_FULL_RELOAD_DAYS = 730
+
 
 def pull_missing_prices(log) -> None:
     stocks = db.stock_list_for_price_pull()
@@ -29,6 +31,8 @@ def pull_missing_prices(log) -> None:
                 continue
 
             fetched_dicts = bars_to_dicts(result.bars)
+            provider = result.provider
+
             if latest is not None:
                 overlap_start = latest - timedelta(days=5)
                 stored_overlap = db.stock_price_get_overlap(stock_id, overlap_start, latest)
@@ -38,12 +42,31 @@ def pull_missing_prices(log) -> None:
                 overlap_dicts = bars_to_dicts(overlap_bars)
                 adjustment = compute_adjustment(stored_overlap, overlap_dicts)
                 log(f"{label}: {adjustment.message}")
+
                 if adjustment.needed:
-                    adjusted_rows = db.stock_price_apply_adjustment(stock_id, adjustment.factor)
-                    log(f"{label}: adjusted {adjusted_rows} historical row(s).")
+                    log(
+                        f"{label}: adjustment factor {adjustment.factor:.6f} detected — "
+                        f"deleting all prices and reloading {_FULL_RELOAD_DAYS} days."
+                    )
+                    deleted = db.stock_price_delete_all(stock_id)
+                    log(f"{label}: deleted {deleted} existing price row(s).")
+
+                    reload_start = end - timedelta(days=_FULL_RELOAD_DAYS)
+                    log(f"{label}: re-fetching {reload_start} to {end}...")
+                    reload_result = fetch_prices(symbol, reload_start, end)
+                    if not reload_result.bars:
+                        log(f"{label}: reload returned no data; skipping merge.")
+                        continue
+                    fetched_dicts = bars_to_dicts(reload_result.bars)
+                    provider = reload_result.provider
+                    log(
+                        f"{label}: reload fetched {len(reload_result.bars)} bar(s) "
+                        f"via {provider}."
+                    )
 
             merged = db.stock_price_merge(stock_id, fetched_dicts)
-            log(f"{label}: merged {merged} row(s) via {result.provider}.")
+            log(f"{label}: merged {merged} row(s) via {provider}.")
+
         except Exception as exc:
             log(f"{label}: ERROR - {exc}")
 

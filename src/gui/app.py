@@ -4,6 +4,7 @@ from tkinter import ttk
 from src.gui.country_tab import CountryTab
 from src.gui.exchange_tab import ExchangeTab
 from src.gui.group_tab import GroupTab
+from src.gui.market_tab import MarketTab
 from src.gui.prices_tab import PricesTab
 from src.gui.stock_tab import StockTab
 
@@ -29,12 +30,14 @@ class StockTradingApp(tk.Tk):
             self.group_tab.refresh_list,
         ]
         self.prices_tab = PricesTab(notebook)
+        self.market_tab = MarketTab(notebook)
 
         notebook.add(self.country_tab, text="Country")
         notebook.add(self.exchange_tab, text="Exchange")
         notebook.add(self.stock_tab, text="Stock")
         notebook.add(self.group_tab, text="Group")
         notebook.add(self.prices_tab, text="Prices")
+        notebook.add(self.market_tab, text="Market")
 
         self.bind("<Visibility>", self._on_visible)
 

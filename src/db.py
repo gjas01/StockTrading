@@ -247,6 +247,16 @@ def stock_price_list(stock_id: int) -> list[dict]:
     return fetch_all("stocks.StockPrice_List", (stock_id,))
 
 
+def stock_price_delete_all(stock_id: int) -> int:
+    """Delete every price row for a stock.  Returns the number of rows removed."""
+    with get_cursor() as cursor:
+        cursor.execute(
+            "DELETE FROM stocks.StockPrice WHERE StockID = ?",
+            (stock_id,),
+        )
+        return cursor.rowcount
+
+
 def stock_price_apply_adjustment(stock_id: int, factor: float) -> int:
     row = execute_proc("stocks.StockPrice_ApplyAdjustment", (stock_id, factor))
     return int(row["RowsAdjusted"]) if row and row.get("RowsAdjusted") is not None else 0
