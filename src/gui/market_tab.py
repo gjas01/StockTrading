@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from src import db
+from src.gui.ledger_sheet import open_ledger_sheet
 from src.services.livermore_ledger import build_ledger, primary_trend
 
 
@@ -38,6 +39,9 @@ class MarketTab(ttk.Frame):
     def __init__(self, master):
         super().__init__(master, padding=12)
 
+        # group iid → full group dict (populated after each run)
+        self._groups: dict[str, dict] = {}
+
         # ── Toolbar ──────────────────────────────────────────────────────────
         toolbar = ttk.Frame(self)
         toolbar.pack(fill="x", pady=(0, 8))
@@ -46,6 +50,14 @@ class MarketTab(ttk.Frame):
             toolbar, text="Run Market Overview", command=self._start_run
         )
         self.run_button.pack(side="left")
+
+        self.ledger_button = ttk.Button(
+            toolbar,
+            text="Open Ledger Sheet",
+            command=self._open_ledger,
+            state="disabled",
+        )
+        self.ledger_button.pack(side="left", padx=(6, 0))
 
         self.status_label = ttk.Label(
             toolbar,
@@ -56,14 +68,14 @@ class MarketTab(ttk.Frame):
 
         # ── Treeview ─────────────────────────────────────────────────────────
         columns = ("group_name", "stock1", "stock2", "stock3", "score", "direction")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings", selectmode="none")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings", selectmode="browse")
 
-        self.tree.heading("group_name", text="Group",       anchor="w")
-        self.tree.heading("stock1",     text="Stock 1",     anchor="center")
-        self.tree.heading("stock2",     text="Stock 2",     anchor="center")
-        self.tree.heading("stock3",     text="Stock 3",     anchor="center")
-        self.tree.heading("score",      text="Score",       anchor="center")
-        self.tree.heading("direction",  text="Direction",   anchor="center")
+        self.tree.heading("group_name", text="Group",     anchor="w")
+        self.tree.heading("stock1",     text="Stock 1",   anchor="center")
+        self.tree.heading("stock2",     text="Stock 2",   anchor="center")
+        self.tree.heading("stock3",     text="Stock 3",   anchor="center")
+        self.tree.heading("score",      text="Score",     anchor="center")
+        self.tree.heading("direction",  text="Direction", anchor="center")
 
         self.tree.column("group_name", width=200, minwidth=120, anchor="w",      stretch=True)
         self.tree.column("stock1",     width=140, minwidth=100, anchor="center", stretch=True)
@@ -83,18 +95,42 @@ class MarketTab(ttk.Frame):
             font=("Segoe UI", 9, "bold"),
         )
 
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
         scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+    # ── Selection handler ─────────────────────────────────────────────────────
+
+    def _on_select(self, _event=None) -> None:
+        selected = self.tree.selection()
+        iid = selected[0] if selected else None
+        # Enable the button only for real group rows (not the TOTAL row)
+        if iid and iid in self._groups:
+            self.ledger_button.configure(state="normal")
+        else:
+            self.ledger_button.configure(state="disabled")
+
+    def _open_ledger(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            return
+        group = self._groups.get(selected[0])
+        if group is None:
+            return
+        open_ledger_sheet(self, group)
+
     # ── Run button ────────────────────────────────────────────────────────────
 
     def _start_run(self):
         self.run_button.configure(state="disabled")
+        self.ledger_button.configure(state="disabled")
         self.status_label.configure(text="Calculating…")
         for item in self.tree.get_children():
             self.tree.delete(item)
+        self._groups.clear()
         threading.Thread(target=self._worker, daemon=True).start()
 
     # ── Background worker ──────────────────────────────────────────────────────
@@ -102,10 +138,9 @@ class MarketTab(ttk.Frame):
     def _worker(self):
         try:
             groups = db.group_list()
-            result_rows: list[tuple[str, list[tuple[str, str | None]]]] = []
+            result_rows: list[tuple[dict, list[tuple[str, str | None]]]] = []
 
             for group in groups:
-                group_name = group.get("GroupName", f"Group #{group['GroupID']}")
                 stock_specs = [
                     (
                         group[f"Stock{n}Ticker"],
@@ -121,7 +156,7 @@ class MarketTab(ttk.Frame):
                     trend = primary_trend(rows)
                     stock_trends.append((ticker, trend))
 
-                result_rows.append((group_name, stock_trends))
+                result_rows.append((group, stock_trends))
 
             self.after(0, lambda r=result_rows: self._populate(r))
 
@@ -137,10 +172,11 @@ class MarketTab(ttk.Frame):
 
     def _populate(
         self,
-        result_rows: list[tuple[str, list[tuple[str, str | None]]]],
+        result_rows: list[tuple[dict, list[tuple[str, str | None]]]],
     ) -> None:
         for item in self.tree.get_children():
             self.tree.delete(item)
+        self._groups.clear()
 
         if not result_rows:
             self.status_label.configure(text="No groups found.")
@@ -148,7 +184,11 @@ class MarketTab(ttk.Frame):
 
         total_score = 0
 
-        for group_name, stock_trends in result_rows:
+        for group, stock_trends in result_rows:
+            group_name = group.get("GroupName", f"Group #{group['GroupID']}")
+            iid = str(group["GroupID"])
+            self._groups[iid] = group
+
             raw_sum = sum(_trend_score(trend) for _, trend in stock_trends)
             # Group rating is always +1, -1, or 0 (majority direction, not raw sum)
             group_rating = 1 if raw_sum > 0 else (-1 if raw_sum < 0 else 0)
@@ -157,16 +197,14 @@ class MarketTab(ttk.Frame):
             tag = "up" if group_rating > 0 else ("down" if group_rating < 0 else "neutral")
             direction = _direction_symbol(group_rating)
 
-            cells = [
-                _trend_cell(ticker, trend) for ticker, trend in stock_trends
-            ]
-            # Pad to exactly 3 stocks in case fewer exist
+            cells = [_trend_cell(ticker, trend) for ticker, trend in stock_trends]
             while len(cells) < 3:
                 cells.append("")
 
             self.tree.insert(
                 "",
                 "end",
+                iid=iid,
                 values=(
                     group_name,
                     cells[0],
@@ -183,6 +221,7 @@ class MarketTab(ttk.Frame):
         self.tree.insert(
             "",
             "end",
+            iid="TOTAL",
             values=(
                 "TOTAL",
                 "",
