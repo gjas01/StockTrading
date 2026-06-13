@@ -827,6 +827,120 @@ def threshold_labels(multiplier: float = 1.0) -> tuple[str, str, str]:
     )
 
 
+@dataclass
+class TradingSignal:
+    """An active potential buy or sell signal derived from the Livermore ledger.
+
+    Sell signals arise from blue (near-upper-pivot) marks on the Secondary
+    Rally column; buy signals from red (near-lower-pivot) marks on the
+    Secondary Reaction column.
+
+    ``trigger_price`` is the Secondary Rally / Reaction column value recorded
+    on ``trigger_date`` (the high / low that got within 1.5 % of the pivot).
+    ``reference_price`` is the 3 % stop level that must be breached to
+    invalidate the signal.
+    """
+    direction: Literal["buy", "sell"]
+    trigger_date: date
+    pivot_price: float
+    trigger_price: float
+    reference_price: float
+    context: str
+
+
+def find_signals(rows: list[LedgerRow]) -> list[TradingSignal]:
+    """Return active potential buy and sell signals found in *rows*.
+
+    At most one sell and one buy signal are returned — the most recent
+    occurrence of each that has not yet been stopped out.
+
+    Sell signals (Rules 1 & 2):
+      - Triggered by a blue mark on the secondary_rally column (high within
+        1.5 % of the upper pivot: either the UpTrend pivot for Rule 1, or
+        the Natural Rally pivot for Rule 2).
+      - Reference price = min(pivot, trigger_price) * 0.97.
+      - Signal is active if NO subsequent row has low <= reference_price.
+
+    Buy signals (Rules 3 & 4):
+      - Triggered by a red mark on the secondary_reaction column (low within
+        1.5 % of the lower pivot: either the DownTrend pivot for Rule 3, or
+        the Natural Reaction pivot for Rule 4).
+      - Reference price = max(pivot, trigger_price) * 1.03.
+      - Signal is active if NO subsequent row has high >= reference_price.
+    """
+    signals: list[TradingSignal] = []
+
+    # ── Potential Sell ────────────────────────────────────────────────────────
+    last_blue = next(
+        (i for i in range(len(rows) - 1, -1, -1) if "secondary_rally" in rows[i].blue),
+        None,
+    )
+    if last_blue is not None:
+        row = rows[last_blue]
+        pivot_upper: Optional[float] = None
+        context = ""
+        for j in range(last_blue, -1, -1):
+            r = rows[j]
+            if "upward_trend" in r.pivotal and r.upward_trend is not None:
+                pivot_upper = r.upward_trend
+                context = "UpTrend pivot (Rule 1)"
+                break
+            if "natural_rally" in r.pivotal and r.natural_rally is not None:
+                pivot_upper = r.natural_rally
+                context = "Natural Rally pivot (Rule 2)"
+                break
+
+        if pivot_upper is not None and row.secondary_rally is not None:
+            trigger_price = row.secondary_rally
+            reference = min(pivot_upper, trigger_price) * (1.0 - CONTINUATION_PCT)
+            hit = any(r.low <= reference for r in rows[last_blue + 1:])
+            if not hit:
+                signals.append(TradingSignal(
+                    direction="sell",
+                    trigger_date=row.trade_date,
+                    pivot_price=pivot_upper,
+                    trigger_price=trigger_price,
+                    reference_price=reference,
+                    context=context,
+                ))
+
+    # ── Potential Buy ─────────────────────────────────────────────────────────
+    last_red = next(
+        (i for i in range(len(rows) - 1, -1, -1) if "secondary_reaction" in rows[i].red),
+        None,
+    )
+    if last_red is not None:
+        row = rows[last_red]
+        pivot_lower: Optional[float] = None
+        context = ""
+        for j in range(last_red, -1, -1):
+            r = rows[j]
+            if "downward_trend" in r.pivotal and r.downward_trend is not None:
+                pivot_lower = r.downward_trend
+                context = "DownTrend pivot (Rule 3)"
+                break
+            if "natural_reaction" in r.pivotal and r.natural_reaction is not None:
+                pivot_lower = r.natural_reaction
+                context = "Natural Reaction pivot (Rule 4)"
+                break
+
+        if pivot_lower is not None and row.secondary_reaction is not None:
+            trigger_price = row.secondary_reaction
+            reference = max(pivot_lower, trigger_price) * (1.0 + CONTINUATION_PCT)
+            hit = any(r.high >= reference for r in rows[last_red + 1:])
+            if not hit:
+                signals.append(TradingSignal(
+                    direction="buy",
+                    trigger_date=row.trade_date,
+                    pivot_price=pivot_lower,
+                    trigger_price=trigger_price,
+                    reference_price=reference,
+                    context=context,
+                ))
+
+    return signals
+
+
 def primary_trend(rows: list[LedgerRow]) -> Literal["up", "down"] | None:
     """Return the primary trend direction based on the most recently recorded
     Upward Trend or Downward Trend entry.
